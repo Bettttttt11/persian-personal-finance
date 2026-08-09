@@ -7,7 +7,7 @@ const SESSION_PREFIX='v1';
 export async function validateTelegramInitData(initData,botToken,ownerId){
   if(!initData||!botToken)throw new Error('UNAUTHORIZED');
   const p=new URLSearchParams(initData),received=p.get('hash');if(!received)throw new Error('UNAUTHORIZED');
-  p.delete('hash');p.delete('signature');
+  p.delete('hash');
   const check=[...p.entries()].sort(([a],[b])=>a.localeCompare(b)).map(([k,v])=>`${k}=${v}`).join('\n');
   const secret=await hmac('WebAppData',botToken),expected=await hmacHex(secret,check,true);
   if(!constantTimeEqual(received.toLowerCase(),expected.toLowerCase()))throw new Error('UNAUTHORIZED');
