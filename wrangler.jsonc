@@ -8,8 +8,11 @@
     "binding": "ASSETS",
     "run_worker_first": ["/", "/telegram", "/api/*", "/app"]
   },
-  "r2_buckets": [
-    { "binding": "RECEIPTS_BUCKET" }
+  "kv_namespaces": [
+    {
+      "binding": "RECEIPTS_KV",
+      "id": "d4862a9889e146bb835f9075a47baae1"
+    }
   ],
   "durable_objects": {
     "bindings": [

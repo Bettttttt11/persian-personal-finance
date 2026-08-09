@@ -7,7 +7,7 @@ import { previewImport, confirmImport } from './imports.js';
 import { createBackup, previewRestore, applyRestore } from './backup.js';
 import { undoLast } from './audit.js';
 import { getCapabilities, handleAiText, confirmAiActions, extractReceipt, analyzePdf } from './ai.js';
-import { saveReceipt, replaceWithWebp, getPrivate, putPrivate, deleteReceipt, saveInboxFile, storageStats, hasR2 } from './storage.js';
+import { saveReceipt, replaceWithWebp, getPrivate, putPrivate, deleteReceipt, saveInboxFile, storageStats, hasR2, probePrivateStorage, storageKind } from './storage.js';
 import { telegramCall } from './telegram-api.js';
 import { SCHEMA_VERSION, bad, clearCookie as clearCookieUtil, corsHeaders, nowIso, ok, safeJsonParse, securityHeaders, toCsv, userError, uuid } from './utils.js';
 import { parseDateInput } from './jalali.js';
@@ -31,7 +31,7 @@ function filtersFrom(url){
 }
 function validateConfig(env){
   const required=['TELEGRAM_BOT_TOKEN','OWNER_TELEGRAM_ID','SPREADSHEET_ID','GOOGLE_SERVICE_ACCOUNT_JSON','BOT_PIN','SESSION_SECRET'],missing=required.filter(key=>!env[key]);
-  const checks={required_secrets:{ok:missing.length===0,missing},session_secret:{ok:!!env.SESSION_SECRET&&String(env.SESSION_SECRET).length>=24},r2:{configured:hasR2(env)},openrouter:{configured:!!env.OPENROUTER_API_KEY},public_base_url:{configured:!!env.PUBLIC_BASE_URL}};
+  const checks={required_secrets:{ok:missing.length===0,missing},session_secret:{ok:!!env.SESSION_SECRET&&String(env.SESSION_SECRET).length>=24},storage:{configured:hasR2(env),kind:storageKind(env)},openrouter:{configured:!!env.OPENROUTER_API_KEY},public_base_url:{configured:!!env.PUBLIC_BASE_URL}};
   return checks;
 }
 async function createFinancial(finance,body,source){
@@ -182,7 +182,7 @@ function validateSetting(key,value){
   if(key.startsWith('openrouter_')&&key.endsWith('_model')&&value!==null&&typeof value!=='string')throw new Error('VALIDATION');
   if(key==='default_account'&&value!==null&&typeof value!=='string')throw new Error('VALIDATION');
 }
-async function publicSettings(repo,env){const out={};for(const key of ALLOWED_SETTINGS)out[key]=await repo.setting(key,null);out.r2_configured=hasR2(env);out.openrouter_configured=!!env.OPENROUTER_API_KEY;return out;}
+async function publicSettings(repo,env){const out={};for(const key of ALLOWED_SETTINGS)out[key]=await repo.setting(key,null);out.storage_configured=hasR2(env);out.storage_kind=storageKind(env);out.r2_configured=hasR2(env);out.openrouter_configured=!!env.OPENROUTER_API_KEY;return out;}
 function validateEntityInput(sheet,row){
   const moneyFields={Accounts:['opening_balance'],Projects:['budget'],Installments:['total_amount','default_installment_amount'],Recurring:['amount'],Budgets:['amount'],Debts:['principal_amount','settled_amount']}[sheet]||[];
   for(const key of moneyFields)if(row[key]!==undefined&&row[key]!==''){const n=Number(row[key]);if(!Number.isSafeInteger(n)||n<0)throw new Error('INVALID_MONEY');row[key]=n;}
@@ -256,10 +256,10 @@ async function restoreReceiptFiles(request,repo,env,id){
 }
 
 async function health(repo,env){
-  const out={config:validateConfig(env),telegram:{ok:false},google_sheets:{ok:false},r2:{ok:false,configured:hasR2(env)},openrouter:{ok:false,configured:!!env.OPENROUTER_API_KEY},schema:{ok:false,version:SCHEMA_VERSION}};
+  const storage=await probePrivateStorage(env);
+  const out={config:validateConfig(env),telegram:{ok:false},google_sheets:{ok:false},storage:{ok:storage.ok,configured:storage.kind!=='none',kind:storage.kind},r2:{ok:storage.ok,configured:storage.kind!=='none'},openrouter:{ok:false,configured:!!env.OPENROUTER_API_KEY},schema:{ok:false,version:SCHEMA_VERSION}};
   try{await repo.spreadsheetInfo();out.google_sheets.ok=true;}catch{}
   try{await telegramCall(env,'getMe',{});out.telegram.ok=true;}catch{}
-  if(hasR2(env))try{await env.RECEIPTS_BUCKET.list({limit:1});out.r2.ok=true;}catch{}
   try{const caps=await getCapabilities(repo,env);out.openrouter.ok=!!caps.configured&&!!caps.text;out.openrouter.capabilities={text:caps.text,vision:caps.vision,audio:caps.audio,file:caps.file};}catch{}
   try{const migrations=await repo.list('Migrations',{limit:500});out.schema.ok=migrations.some(x=>Number(x.schema_version)===SCHEMA_VERSION);}catch{}
   return out;
