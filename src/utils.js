@@ -1,4 +1,4 @@
-export const SCHEMA_VERSION = 7;
+export const SCHEMA_VERSION = 8;
 export const DEFAULT_CURRENCY = 'IRR';
 export const STORAGE_CURRENCY = 'IRR';
 export const SESSION_TIMEOUTS = { '15m': 900, '30m': 1800, '1h': 3600, manual: null };
@@ -6,6 +6,15 @@ export const SESSION_TIMEOUTS = { '15m': 900, '30m': 1800, '1h': 3600, manual: n
 export function uuid() { return crypto.randomUUID(); }
 export function nowIso() { return new Date().toISOString(); }
 export function todayIso() { return new Date().toISOString().slice(0, 10); }
+export function tehranTime(now=new Date()) {
+  const parts=Object.fromEntries(new Intl.DateTimeFormat('en-GB',{timeZone:'Asia/Tehran',hour:'2-digit',minute:'2-digit',second:'2-digit',hourCycle:'h23'}).formatToParts(now).map(x=>[x.type,x.value]));
+  return `${parts.hour||'00'}:${parts.minute||'00'}:${parts.second||'00'}`;
+}
+export function normalizeTime(v='',fallback=tehranTime()) {
+  const s=digitsEn(String(v||'').trim()); if(!s)return fallback; const m=s.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/); if(!m)throw new Error('VALIDATION');
+  const h=Number(m[1]),mi=Number(m[2]),se=Number(m[3]||0); if(h>23||mi>59||se>59)throw new Error('VALIDATION');
+  return `${String(h).padStart(2,'0')}:${String(mi).padStart(2,'0')}:${String(se).padStart(2,'0')}`;
+}
 export function digitsEn(v='') {
   const fa='۰۱۲۳۴۵۶۷۸۹', ar='٠١٢٣٤٥٦٧٨٩';
   return String(v).replace(/[۰-۹]/g,d=>fa.indexOf(d)).replace(/[٠-٩]/g,d=>ar.indexOf(d));

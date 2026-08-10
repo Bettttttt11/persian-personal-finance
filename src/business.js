@@ -1,4 +1,4 @@
-import { DEFAULT_CURRENCY, SCHEMA_VERSION, bool, json, normalizeText, nowIso, parseMoney, safeJsonParse, toRial, uuid } from './utils.js';
+import { DEFAULT_CURRENCY, SCHEMA_VERSION, bool, json, normalizeText, normalizeTime, nowIso, parseMoney, safeJsonParse, tehranTime, toRial, uuid } from './utils.js';
 import { formatJalali, parseDateInput } from './jalali.js';
 import { ID_FIELD } from './schema.js';
 
@@ -69,7 +69,7 @@ export class FinanceService{
 
     const tx={
       transaction_id:uuid(),type,amount,currency:'IRR',
-      transaction_date:formatJalali(iso),transaction_date_iso:iso,
+      transaction_date:formatJalali(iso),transaction_date_iso:iso,transaction_time:normalizeTime(input.transaction_time||'',tehranTime()),
       created_at:nowIso(),updated_at:nowIso(),account_id:input.account_id||'',
       destination_account_id:input.destination_account_id||'',category_id:input.category_id||'',
       person_id:input.person_id||'',project_id:input.project_id||'',merchant_id:input.merchant_id||'',
@@ -99,6 +99,7 @@ export class FinanceService{
     if(clean.fee_amount!==undefined)clean.fee_amount=toRial(intMoney(clean.fee_amount),inputCurrency);
     delete clean.currency;
     if(clean.transaction_date!==undefined||clean.transaction_date_iso!==undefined){const iso=parseDateInput(clean.transaction_date_iso||clean.transaction_date);clean.transaction_date_iso=iso;clean.transaction_date=formatJalali(iso);}
+    if(clean.transaction_time!==undefined)clean.transaction_time=normalizeTime(clean.transaction_time,'00:00:00');
     if(clean.type!==undefined&&!TX_TYPES.has(clean.type))throw new Error('VALIDATION');
     if(clean.type!==undefined&&clean.type!==before.type)throw new Error('VALIDATION');
     for(const [field,sheet] of [['account_id','Accounts'],['destination_account_id','Accounts'],['category_id','Categories'],['person_id','People'],['project_id','Projects'],['merchant_id','Merchants'],['parent_transaction_id','Transactions']])if(clean[field])await ensureRef(this.repo,sheet,clean[field]);

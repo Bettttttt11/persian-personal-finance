@@ -297,7 +297,7 @@ async function health(repo,env){
   const out={config:validateConfig(env),telegram:{ok:false},google_sheets:{ok:false},storage:{ok:storage.ok,configured:storage.kind!=='none',kind:storage.kind},r2:{ok:storage.ok,configured:storage.kind!=='none'},openrouter:{ok:false,configured:!!env.OPENROUTER_API_KEY},schema:{ok:false,version:SCHEMA_VERSION}};
   try{await repo.spreadsheetInfo();out.google_sheets.ok=true;}catch{}
   try{await telegramCall(env,'getMe',{});out.telegram.ok=true;}catch{}
-  try{const caps=await getCapabilities(repo,env);out.openrouter.ok=!!caps.configured&&!!caps.text;out.openrouter.capabilities={text:caps.text,vision:caps.vision,audio:caps.audio,file:caps.file};}catch{}
+  try{const caps=await getCapabilities(repo,env);out.openrouter.ok=!!caps.configured&&!!caps.text;out.openrouter.capabilities={text:caps.text,vision:caps.vision,audio:caps.audio,file:caps.file};out.openrouter.model=caps.models?.text?.id||'';out.openrouter.requested_model=caps.requested_models?.text||'';out.openrouter.fallback_used=!!caps.fallback_used;out.openrouter.error=caps.error||'';}catch{}
   try{const migrations=await repo.list('Migrations',{limit:500});out.schema.ok=migrations.some(x=>Number(x.schema_version)===SCHEMA_VERSION);}catch{}
   return out;
 }

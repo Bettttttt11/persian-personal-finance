@@ -33,7 +33,7 @@ export async function queryTransactions(repo,filters={}){
     const q=normalizeText(filters.q),maps=await lookupMaps(repo);
     txs=txs.filter(t=>normalizeText([t.amount,t.description,t.note,t.tracking_number,t.reference_number,t.bank_transaction_id,maps.people[t.person_id],maps.merchants[t.merchant_id],maps.projects[t.project_id],maps.categories[t.category_id],...(tagNamesByTx[t.transaction_id]||[])].join(' ')).includes(q));
   }
-  txs.sort((a,b)=>String(b.transaction_date_iso).localeCompare(String(a.transaction_date_iso))||String(b.created_at).localeCompare(String(a.created_at)));return txs;
+  txs.sort((a,b)=>String(b.transaction_date_iso).localeCompare(String(a.transaction_date_iso))||String(b.transaction_time||'00:00:00').localeCompare(String(a.transaction_time||'00:00:00'))||String(b.created_at).localeCompare(String(a.created_at)));return txs;
 }
 
 export function summarize(txs){

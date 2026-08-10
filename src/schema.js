@@ -1,6 +1,6 @@
-import { SCHEMA_VERSION, nowIso, safeJsonParse, uuid } from './utils.js';
+import { SCHEMA_VERSION, nowIso, safeJsonParse, tehranTime, uuid } from './utils.js';
 export const SHEETS={
- Transactions:['transaction_id','type','amount','currency','transaction_date','transaction_date_iso','created_at','updated_at','account_id','destination_account_id','category_id','person_id','project_id','merchant_id','description','note','fee_amount','fee_note','tracking_number','reference_number','bank_transaction_id','receipt_count','status','source','parent_transaction_id','is_starred','is_deleted','deleted_at','created_by','import_batch_id','bank_fingerprint','metadata_json','schema_version'],
+ Transactions:['transaction_id','type','amount','currency','transaction_date','transaction_date_iso','transaction_time','created_at','updated_at','account_id','destination_account_id','category_id','person_id','project_id','merchant_id','description','note','fee_amount','fee_note','tracking_number','reference_number','bank_transaction_id','receipt_count','status','source','parent_transaction_id','is_starred','is_deleted','deleted_at','created_by','import_batch_id','bank_fingerprint','metadata_json','schema_version'],
  Accounts:['account_id','name','type','opening_balance','color','icon','favorite','archived','is_deleted','deleted_at','note','created_at','updated_at','schema_version'],
  Categories:['category_id','name','icon','color','type','favorite','archived','is_deleted','deleted_at','created_at','updated_at','schema_version'],
  People:['person_id','name','phone','note','color','favorite','archived','is_deleted','deleted_at','created_at','updated_at','schema_version'],
@@ -39,6 +39,15 @@ const LEGACY_MONEY_FIELDS={
   Transactions:['amount','fee_amount'],Accounts:['opening_balance'],Projects:['budget'],Installments:['total_amount','default_installment_amount'],InstallmentPayments:['amount','fee_amount'],Debts:['principal_amount','settled_amount'],DebtPayments:['amount','fee_amount'],Recurring:['amount'],Budgets:['amount'],Splits:['total_amount'],SplitItems:['paid_amount','share_amount','balance']
 };
 function rialize(v){if(v===''||v===null||v===undefined)return v;const n=Number(v);return Number.isFinite(n)?n*10:v;}
+function timeFromCreatedAt(value){
+  try{const d=new Date(value);if(Number.isNaN(d.getTime()))return '00:00:00';return tehranTime(d);}catch{return '00:00:00';}
+}
+async function migrateTransactionTimes(repo){
+  if(await repo.setting('transaction_time_v8',false))return 0;
+  const rows=await repo.list('Transactions',{limit:50000}),missing=rows.filter(r=>!String(r.transaction_time||'').trim());
+  if(missing.length){const patched=missing.map(input=>{const row={...input};delete row.__row;row.transaction_time=timeFromCreatedAt(row.created_at);row.schema_version=SCHEMA_VERSION;return row;});await repo.bulkUpsert('Transactions',patched,{overwrite:true,audit:false,action:'transaction_time_v8'});}
+  await repo.setSetting('transaction_time_v8',true);return missing.length;
+}
 async function migrateLegacyTomanToRial(repo){
   const splitModes=new Map((await repo.list('Splits',{limit:20000})).map(x=>[String(x.split_id),String(x.mode||'equal')]));
   for(const [sheet,fields] of Object.entries(LEGACY_MONEY_FIELDS)){
@@ -66,10 +75,11 @@ export async function migrate(repo){
 
   const migs=await repo.list('Migrations',{limit:2000}),already=migs.some(x=>Number(x.schema_version)===SCHEMA_VERSION);
   if(!already){
+    const currencyAlreadyMigrated=await repo.setting('currency_v7_Transactions',false);
     await migrateLegacyTomanToRial(repo);
-    const currentCurrency=await repo.findOne('Settings',x=>x.key==='default_currency');
-    if(currentCurrency)await repo.updateById('Settings',currentCurrency.setting_id,{value_json:JSON.stringify('IRR'),updated_at:nowIso(),schema_version:SCHEMA_VERSION},{audit:false});
-    await repo.batchInsert('Migrations',[{migration_id:uuid(),schema_version:SCHEMA_VERSION,applied_at:nowIso(),details_json:JSON.stringify({sheets:names,added_sheets:missingSheets,currency_storage:'IRR',legacy_toman_converted:true})}],{audit:false});
+    await migrateTransactionTimes(repo);
+    if(!currencyAlreadyMigrated){const currentCurrency=await repo.findOne('Settings',x=>x.key==='default_currency');if(currentCurrency)await repo.updateById('Settings',currentCurrency.setting_id,{value_json:JSON.stringify('IRR'),updated_at:nowIso(),schema_version:SCHEMA_VERSION},{audit:false});}
+    await repo.batchInsert('Migrations',[{migration_id:uuid(),schema_version:SCHEMA_VERSION,applied_at:nowIso(),details_json:JSON.stringify({sheets:names,added_sheets:missingSheets,currency_storage:'IRR',legacy_toman_converted:!currencyAlreadyMigrated,transaction_time_backfilled:true})}],{audit:false});
   }
 
   const cats=await repo.list('Categories',{limit:200,includeDeleted:false});
