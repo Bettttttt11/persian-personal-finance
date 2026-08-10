@@ -1,19 +1,30 @@
 import { b64url, b64urlText } from './utils.js';
 
+const TOKEN_CACHE = new Map();
+const TOKEN_PROMISES = new Map();
+
 function pemToBytes(pem){ const b64=pem.replace(/-----BEGIN PRIVATE KEY-----|-----END PRIVATE KEY-----|\s/g,''); return Uint8Array.from(atob(b64),c=>c.charCodeAt(0)); }
 export class GoogleSheetsClient {
-  constructor(env){ this.env=env; this.sa=JSON.parse(env.GOOGLE_SERVICE_ACCOUNT_JSON); this.token=null; this.tokenExp=0; }
+  constructor(env){ this.env=env; this.sa=JSON.parse(env.GOOGLE_SERVICE_ACCOUNT_JSON); this.cacheKey=`${this.sa.client_email||''}:${this.sa.private_key_id||''}`; }
   async accessToken(){
-    const now=Math.floor(Date.now()/1000); if(this.token && now < this.tokenExp-60) return this.token;
-    const header=b64urlText(JSON.stringify({alg:'RS256',typ:'JWT',kid:this.sa.private_key_id}));
-    const claims=b64urlText(JSON.stringify({iss:this.sa.client_email,scope:'https://www.googleapis.com/auth/spreadsheets',aud:'https://oauth2.googleapis.com/token',iat:now,exp:now+3600}));
-    const input=`${header}.${claims}`;
-    const key=await crypto.subtle.importKey('pkcs8',pemToBytes(this.sa.private_key),{name:'RSASSA-PKCS1-v1_5',hash:'SHA-256'},false,['sign']);
-    const sig=await crypto.subtle.sign('RSASSA-PKCS1-v1_5',key,new TextEncoder().encode(input));
-    const assertion=`${input}.${b64url(sig)}`;
-    const body=new URLSearchParams({grant_type:'urn:ietf:params:oauth:grant-type:jwt-bearer',assertion});
-    const r=await fetch('https://oauth2.googleapis.com/token',{method:'POST',headers:{'content-type':'application/x-www-form-urlencoded'},body});
-    const j=await r.json(); if(!r.ok||!j.access_token) throw new Error('GOOGLE_AUTH_FAILED'); this.token=j.access_token;this.tokenExp=now+(j.expires_in||3600); return this.token;
+    const now=Math.floor(Date.now()/1000),cached=TOKEN_CACHE.get(this.cacheKey);
+    if(cached?.token && now < cached.exp-60)return cached.token;
+    if(TOKEN_PROMISES.has(this.cacheKey))return TOKEN_PROMISES.get(this.cacheKey);
+    const pending=(async()=>{
+      const header=b64urlText(JSON.stringify({alg:'RS256',typ:'JWT',kid:this.sa.private_key_id}));
+      const claims=b64urlText(JSON.stringify({iss:this.sa.client_email,scope:'https://www.googleapis.com/auth/spreadsheets',aud:'https://oauth2.googleapis.com/token',iat:now,exp:now+3600}));
+      const input=`${header}.${claims}`;
+      const key=await crypto.subtle.importKey('pkcs8',pemToBytes(this.sa.private_key),{name:'RSASSA-PKCS1-v1_5',hash:'SHA-256'},false,['sign']);
+      const sig=await crypto.subtle.sign('RSASSA-PKCS1-v1_5',key,new TextEncoder().encode(input));
+      const assertion=`${input}.${b64url(sig)}`;
+      const body=new URLSearchParams({grant_type:'urn:ietf:params:oauth:grant-type:jwt-bearer',assertion});
+      const r=await fetch('https://oauth2.googleapis.com/token',{method:'POST',headers:{'content-type':'application/x-www-form-urlencoded'},body});
+      const j=await r.json();if(!r.ok||!j.access_token)throw new Error('GOOGLE_AUTH_FAILED');
+      TOKEN_CACHE.set(this.cacheKey,{token:j.access_token,exp:now+(j.expires_in||3600)});
+      return j.access_token;
+    })();
+    TOKEN_PROMISES.set(this.cacheKey,pending);
+    try{return await pending;}finally{TOKEN_PROMISES.delete(this.cacheKey);}
   }
   async call(path, init={}){
     const token=await this.accessToken(); const r=await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(this.env.SPREADSHEET_ID)}${path}`,{...init,headers:{authorization:`Bearer ${token}`,'content-type':'application/json',...(init.headers||{})}});

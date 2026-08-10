@@ -48,7 +48,10 @@ export async function handleApi(request,env){
     if(path==='/api/auth/login'&&request.method==='POST'){
       const login=await loginMiniApp(request,repo,env),response=ok({user:{id:login.user.id,first_name:login.user.first_name||''}});response.headers.append('set-cookie',login.cookie);return withCors(response,request,env);
     }
-    const auth=await authenticateMiniApi(request,repo,env),finance=new FinanceService(repo,'owner');
+    const auth=await authenticateMiniApi(request,repo,env);
+    if(request.method==='GET'&&path==='/api/dashboard')await repo.prefetch(['Transactions','Accounts','Categories','People','Projects','Merchants','Tags','Installments','Debts','Inbox','Budgets','Settings']);
+    else if(request.method==='GET'&&path==='/api/transactions'){const names=['Transactions'];if(url.searchParams.get('tag_id')||url.searchParams.get('q'))names.push('EntityTags','Tags');if(url.searchParams.get('q'))names.push('Accounts','Categories','People','Projects','Merchants');await repo.prefetch(names);}
+    const finance=new FinanceService(repo,'owner');
     if(path==='/api/auth/logout'&&request.method==='POST'){
       await revokeSession(repo,auth.session.session_id);const response=ok();response.headers.append('set-cookie',clearCookieUtil('pf_session'));return withCors(response,request,env);
     }

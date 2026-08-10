@@ -6,7 +6,8 @@ function confirmed(t){return String(t.status||'confirmed')==='confirmed';}
 
 export async function lookupMaps(repo){
   const defs=[['Accounts','account_id','accounts'],['Categories','category_id','categories'],['People','person_id','people'],['Projects','project_id','projects'],['Merchants','merchant_id','merchants'],['Tags','tag_id','tags']];
-  const out={};for(const [sheet,id,key]of defs){const rows=await repo.list(sheet,{limit:5000});out[key]=Object.fromEntries(rows.map(r=>[r[id],r.name||r.title||'']));}return out;
+  const loaded=await Promise.all(defs.map(async([sheet,id,key])=>[key,id,await repo.list(sheet,{limit:5000})]));
+  const out={};for(const [key,id,rows]of loaded)out[key]=Object.fromEntries(rows.map(r=>[r[id],r.name||r.title||'']));return out;
 }
 
 export async function queryTransactions(repo,filters={}){
@@ -84,9 +85,16 @@ export async function budgetProgress(repo,range,txs){
 }
 
 export async function dashboard(repo,finance){
-  const period=jalaliMonthRange(),rep=await report(repo,{from:period.start,to:period.end}),accounts=await repo.list('Accounts',{limit:500,filter:x=>String(x.archived)!=='true'}),balanceMap=await finance.accountBalances(accounts.map(a=>a.account_id));
-  const installments=await repo.list('Installments',{limit:500,filter:x=>x.status!=='completed'&&String(x.archived)!=='true'}),debts=await repo.list('Debts',{limit:2000,filter:x=>x.kind==='receivable'&&x.status!=='settled'}),inbox=await repo.list('Inbox',{limit:2000,filter:x=>x.status==='pending'});
-  const outstanding=debts.reduce((s,d)=>s+Math.max(0,Number(d.principal_amount||0)-Number(d.settled_amount||0)),0),budgets=await budgetProgress(repo,period,rep.transactions);
+  const period=jalaliMonthRange();
+  const [rep,accounts,installments,debts,inbox]=await Promise.all([
+    report(repo,{from:period.start,to:period.end}),
+    repo.list('Accounts',{limit:500,filter:x=>String(x.archived)!=='true'}),
+    repo.list('Installments',{limit:500,filter:x=>x.status!=='completed'&&String(x.archived)!=='true'}),
+    repo.list('Debts',{limit:2000,filter:x=>x.kind==='receivable'&&x.status!=='settled'}),
+    repo.list('Inbox',{limit:2000,filter:x=>x.status==='pending'})
+  ]);
+  const [balanceMap,budgets]=await Promise.all([finance.accountBalances(accounts.map(a=>a.account_id)),budgetProgress(repo,period,rep.transactions)]);
+  const outstanding=debts.reduce((s,d)=>s+Math.max(0,Number(d.principal_amount||0)-Number(d.settled_amount||0)),0);
   return{period,summary:rep.summary,categories:rep.categories.slice(0,8),recent:rep.transactions.slice(0,12),accounts:accounts.map(a=>({...a,balance:Number(balanceMap[a.account_id]||0)})),upcoming_installments:installments.sort((a,b)=>String(a.start_date).localeCompare(String(b.start_date))).slice(0,5),outstanding_receivables:outstanding,inbox_count:inbox.length,budgets};
 }
 
