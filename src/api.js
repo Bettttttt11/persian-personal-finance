@@ -6,7 +6,7 @@ import { dashboard, report, comparePeriods, queryTransactions, personSummary, pr
 import { previewImport, confirmImport } from './imports.js';
 import { createBackup, previewRestore, applyRestore } from './backup.js';
 import { undoLast } from './audit.js';
-import { getCapabilities, handleAiText, confirmAiActions, extractReceipt, analyzePdf } from './ai.js';
+import { getCapabilities, handleAiText, confirmAiActions, removeAiAction, reviseAiActions, getAiDraft, extractReceipt, analyzePdf } from './ai.js';
 import { saveReceipt, replaceWithWebp, getPrivate, putPrivate, deleteReceipt, saveInboxFile, storageStats, hasR2, probePrivateStorage, storageKind } from './storage.js';
 import { telegramCall, telegramSendDocument } from './telegram-api.js';
 import { DEFAULT_CURRENCY, SCHEMA_VERSION, bad, bool, clearCookie as clearCookieUtil, corsHeaders, currencyCode, fromRial, nowIso, ok, safeJsonParse, securityHeaders, toCsv, toRial, userError, uuid } from './utils.js';
@@ -17,7 +17,7 @@ const ALLOWED_SETTINGS=new Set(['session_timeout','keep_original_receipts','rece
 
 function base(env,request){return env.PUBLIC_BASE_URL||new URL(request.url).origin;}
 function withCors(response,request,env){const headers=new Headers(response.headers);for(const [key,value] of Object.entries(corsHeaders(request,base(env,request))))headers.set(key,value);return new Response(response.body,{status:response.status,statusText:response.statusText,headers});}
-function payloadError(error){const status=error.message==='UNAUTHORIZED'?401:error.message==='NOT_FOUND'?404:error.message==='PIN_LOCKED'?429:['IMPORT_REVIEW_REQUIRED','ENTITY_IN_USE'].includes(error.message)?409:400;return bad(userError(error),status,error.message||'ERROR');}
+function payloadError(error){const status=error.message==='UNAUTHORIZED'?401:error.message==='NOT_FOUND'?404:error.message==='PIN_LOCKED'?429:['IMPORT_REVIEW_REQUIRED','ENTITY_IN_USE'].includes(error.message)?409:400,message=error.message==='AI_NEEDS_CLARIFICATION'&&error.detail?String(error.detail).slice(0,300):userError(error);return bad(message,status,error.message||'ERROR');}
 async function bodyJson(request){try{return await request.json();}catch{throw new Error('VALIDATION');}}
 function cleanForClient(row){if(!row)return row;const out={...row};delete out.__row;delete out.token_hash;return out;}
 function cleanDeep(value){if(Array.isArray(value))return value.map(cleanDeep);if(value&&typeof value==='object'){const out={};for(const [key,item] of Object.entries(value)){if(key==='__row'||key==='token_hash')continue;out[key]=cleanDeep(item);}return out;}return value;}
@@ -153,7 +153,10 @@ export async function handleApi(request,env){
 
     else if(path==='/api/ai/capabilities'&&request.method==='GET')result=await getCapabilities(repo,env);
     else if(path==='/api/ai/ask'&&request.method==='POST'){const body=await bodyJson(request);result=await handleAiText(repo,env,body.text||'',Array.isArray(body.history)?body.history:[]);}
+    else if(/^\/api\/ai\/draft\/[^/]+$/.test(path)&&request.method==='GET'){const d=await getAiDraft(repo,path.split('/')[4]);result={draft_id:d.draft.draft_id,status:d.draft.status,actions:d.actions};}
     else if(/^\/api\/ai\/confirm\/[^/]+$/.test(path)&&request.method==='POST')result={items:await confirmAiActions(repo,finance,path.split('/')[4])};
+    else if(/^\/api\/ai\/remove\/[^/]+\/\d+$/.test(path)&&request.method==='POST'){const parts=path.split('/');result=await removeAiAction(repo,parts[4],Number(parts[5]));}
+    else if(/^\/api\/ai\/revise\/[^/]+$/.test(path)&&request.method==='POST'){const body=await bodyJson(request);result=await reviseAiActions(repo,env,path.split('/')[4],body.instruction||'',Array.isArray(body.history)?body.history:[]);}
     else if(/^\/api\/ai\/cancel\/[^/]+$/.test(path)&&request.method==='POST')result=await repo.updateById('Drafts',path.split('/')[4],{status:'discarded'},{action:'ai_cancel'});
     else if(path==='/api/ai/pdf'&&request.method==='POST'){
       const form=await request.formData(),file=form.get('file');if(!(file instanceof File))throw new Error('VALIDATION');result=await analyzePdf(repo,env,await file.arrayBuffer(),file.name);

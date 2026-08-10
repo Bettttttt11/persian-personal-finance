@@ -3,12 +3,12 @@ import { migrate } from './schema.js';
 import { activeBotSession, createBotAuth, revokeBotSessions } from './auth.js';
 import { FinanceService } from './business.js';
 import { currentMonthReport, personSummary, projectSummary, queryTransactions, summarize } from './reports.js';
-import { handleAiText, confirmAiActions, extractReceipt, getCapabilities, transcribeAudio, sanitizeAiText, aiErrorText } from './ai.js';
+import { handleAiText, confirmAiActions, removeAiAction, reviseAiActions, getAiDraft, extractReceipt, getCapabilities, transcribeAudio, sanitizeAiText, aiErrorText } from './ai.js';
 import { telegramCall, webAppUrl, downloadTelegramFile } from './telegram-api.js';
 import { saveReceipt, saveInboxFile, getPrivate, putPrivate, deletePrivate, hasR2, probePrivateStorage, storageKind } from './storage.js';
 import { parseDateInput, formatJalali, tehranToday } from './jalali.js';
 import { advancePastDate } from './recurrence.js';
-import { moneyFa, nowIso, parseMoney, safeJsonParse, SCHEMA_VERSION, tgEscape, uuid, digitsEn, normalizeText, bool, DEFAULT_CURRENCY, currencyCode, fromRial } from './utils.js';
+import { moneyFa, nowIso, parseMoney, safeJsonParse, SCHEMA_VERSION, tgEscape, uuid, digitsEn, normalizeText, bool, DEFAULT_CURRENCY, currencyCode, fromRial, userError } from './utils.js';
 import { rowsFromCsv, previewImport } from './imports.js';
 
 const OWNER_ONLY='Access Denied';
@@ -182,6 +182,14 @@ async function handleText(msg,repo,env,url){
     if(state.action==='ai_choice'){const choice=state.options?.[Number(state.index)]||text;await repo.updateById('Drafts',input.draft.draft_id,{status:'done'},{audit:false});const result=await handleAiText(repo,env,`${state.original_text}\nانتخاب من: ${choice}`);return showAiResult(repo,env,chatId,state.message_id,result,url);}
   }
   const mode=await loadState(repo,'bot_mode');
+  if(mode?.state.mode==='ai_edit'){
+    const history=Array.isArray(mode.state.history)?mode.state.history:[],draftId=mode.state.draft_id;let result;
+    try{result=await reviseAiActions(repo,env,draftId,text,history);}catch(error){return panel(env,chatId,mode.state.message_id,`🤖 ${tgEscape(aiErrorText(error))}
+
+پیشنهاد قبلی هنوز دست‌نخورده است.`,kb([[btn('⬅️ بازگشت به پیشنهاد',`aiback:${draftId}`),btn('❌ لغو پیشنهاد',`aicancel:${draftId}`)]]));}
+    mode.state.mode='ai';mode.state.draft_id='';mode.state.history=[...history,{role:'user',content:`اصلاح پیشنهاد: ${text}`},{role:'assistant',content:result.kind==='actions'?'پیشنهاد اصلاح شد.':String(result.text||'برای اصلاح، توضیح بیشتری لازم است.')}].slice(-12);await updateDraft(repo,mode.draft,mode.state);
+    return showAiResult(repo,env,chatId,mode.state.message_id,result,url,text);
+  }
   if(mode?.state.mode==='ai'){
     const history=Array.isArray(mode.state.history)?mode.state.history:[];let result;
     try{result=await handleAiText(repo,env,text,history);}catch(error){await telegramCall(env,'sendMessage',{chat_id:chatId,text:`🤖 ${aiErrorText(error)}`});return;}
@@ -214,7 +222,13 @@ async function handleCallback(cb,repo,env,url){
   if(data.startsWith('debt:part:'))return startDebtSettlement(repo,env,chatId,mid,url,data.slice(10),false);
   if(data==='m:ai'){await setBotMode(repo,{mode:'ai',message_id:mid});return panel(env,chatId,mid,'🤖 <b>دستیار مالی</b>\nسؤال یا دستور خود را بفرستید. هیچ تغییری بدون تأیید ثبت نمی‌شود.',kb([[btn('خروج از دستیار','ai:exit')]]));}
   if(data==='ai:exit'){await clearBotMode(repo);return showMain(env,chatId,mid,url);}
-  if(data.startsWith('aiok:')){const id=data.slice(5),items=await confirmAiActions(repo,finance,id);return panel(env,chatId,mid,`✅ ${items.length.toLocaleString('fa-IR')} اقدام ثبت شد.`,kb([[btn('ادامه دستیار','m:ai'),btn('🏠 منو','m:home')]]));}
+  if(data.startsWith('aiok:')){const id=data.slice(5);await panel(env,chatId,mid,'⏳ <b>در حال ثبت اقدام‌های تأییدشده…</b>',kb([]));try{const items=await confirmAiActions(repo,finance,id);return panel(env,chatId,mid,`✅ ${items.length.toLocaleString('fa-IR')} اقدام ثبت شد.`,kb([[btn('ادامه دستیار','m:ai'),btn('🏠 منو','m:home')]]));}catch(error){const text=String(error?.message||'').startsWith('AI_')?aiErrorText(error):userError(error);return panel(env,chatId,mid,`⚠️ ${tgEscape(text)}
+پیشنهاد هنوز قابل اصلاح است.`,kb([[btn('✏️ اصلاح پیشنهاد',`aiedit:${id}`),btn('❌ لغو',`aicancel:${id}`)],[btn('ادامه دستیار','m:ai')]]));}}
+  if(data.startsWith('aiedit:')){const id=data.slice(7),mode=await loadState(repo,'bot_mode');if(mode){mode.state={...mode.state,mode:'ai_edit',draft_id:id,message_id:mid};await updateDraft(repo,mode.draft,mode.state);}else await setBotMode(repo,{mode:'ai_edit',draft_id:id,message_id:mid,history:[]});return panel(env,chatId,mid,'✏️ چه چیزی را در پیشنهاد عوض کنم؟ مثلا «مبلغ را ۹۰۰ هزار کن» یا «حساب را ملت بزن».',kb([[btn('⬅️ بازگشت به پیشنهاد',`aiback:${id}`),btn('❌ لغو پیشنهاد',`aicancel:${id}`)]]));}
+  if(data.startsWith('aiback:')){const id=data.slice(7);try{const current=await getAiDraft(repo,id),mode=await loadState(repo,'bot_mode');if(mode){mode.state={...mode.state,mode:'ai',draft_id:'',message_id:mid};await updateDraft(repo,mode.draft,mode.state);}return showAiResult(repo,env,chatId,mid,{kind:'actions',draft_id:id,actions:current.actions},url);}catch(error){return panel(env,chatId,mid,`⚠️ ${tgEscape(aiErrorText(error))}`,kb([[btn('ادامه دستیار','m:ai')]]));}}
+  if(data.startsWith('aidel:')){const parts=data.split(':'),id=parts[1],index=Number(parts[2]);try{const changed=await removeAiAction(repo,id,index);if(!changed.actions.length)return panel(env,chatId,mid,'🗑 همه موارد پیشنهاد حذف شدند.',kb([[btn('ادامه دستیار','m:ai'),btn('🏠 منو','m:home')]]));return showAiResult(repo,env,chatId,mid,{kind:'actions',draft_id:id,actions:changed.actions},url);}catch(error){const current=await getAiDraft(repo,id).catch(()=>null);if(current?.actions?.length)return panel(env,chatId,mid,`⚠️ ${tgEscape(aiErrorText(error))}
+
+پیشنهاد تغییری نکرد.`,kb([[btn('⬅️ نمایش پیشنهاد',`aiback:${id}`),btn('❌ لغو',`aicancel:${id}`)]]));return panel(env,chatId,mid,`⚠️ ${tgEscape(aiErrorText(error))}`,kb([[btn('ادامه دستیار','m:ai')]]));}}
   if(data.startsWith('aicancel:')){const id=data.slice(9),d=await repo.getById('Drafts',id);if(d)await repo.updateById('Drafts',id,{status:'discarded'},{action:'ai_cancel'});return panel(env,chatId,mid,'❌ پیشنهاد لغو شد.',kb([[btn('ادامه دستیار','m:ai'),btn('🏠 منو','m:home')]]));}
   if(data.startsWith('airead:p:')){const s=await personSummary(repo,data.slice(9));return panel(env,chatId,mid,`🤖 طلب باز: ${moneyFa(s.receivable)}\nبدهی باز: ${moneyFa(s.debt)}\nمانده: ${moneyFa(s.balance)}`,kb([[btn('خروج از دستیار','ai:exit')]]));}
   if(data.startsWith('airead:m:')){const tx=await queryTransactions(repo,{merchant_id:data.slice(9)}),s=summarize(tx);return panel(env,chatId,mid,`🤖 خرج خالص این فروشنده: ${moneyFa(s.net_expense)}\nتعداد تراکنش: ${tx.length.toLocaleString('fa-IR')}`,kb([[btn('خروج از دستیار','ai:exit')]]));}
@@ -297,9 +311,9 @@ async function confirmWizard(repo,finance,env,chatId,mid,url){
   await repo.updateById('Drafts',flow.draft.draft_id,{status:'confirmed'},{audit:false});const currency=s.currency||await preferredCurrency(repo);return panel(env,chatId,mid,`✅ ثبت شد\n${moneyFa(result.transaction.amount,currency)}${result.transaction.fee_amount?`\nکارمزد: ${moneyFa(result.transaction.fee_amount,currency)}`:''}`,kb([[btn('➕ ثبت جدید','m:add'),btn('🏠 منو','m:home')]]));
 }
 
-async function formatAiAction(repo,action,index){const x=action.data||{};if(action.action==='create_transaction')return`${index}. ${TYPES[x.type]||'تراکنش'} ${x.amount?moneyFa(x.amount):''}${x.description?` — ${tgEscape(x.description)}`:''}`;if(action.action==='create_person')return`${index}. ساخت شخص: ${tgEscape(x.name||'')}`;if(action.action==='create_project')return`${index}. ساخت پروژه: ${tgEscape(x.name||'')}`;if(action.action==='edit_transaction')return`${index}. ویرایش تراکنش ${tgEscape(String(x.transaction_id||'').slice(0,8))}`;if(action.action==='pay_installment'){const p=x.installment_id?await repo.getById('Installments',x.installment_id):null;return`${index}. پرداخت قسط ${tgEscape(p?.title||'')}${x.amount?` — ${moneyFa(x.amount)}`:''}`;}if(action.action==='settle_debt')return`${index}. تسویه ${x.amount?moneyFa(x.amount):''}`;return`${index}. اقدام مالی`;}
+async function formatAiAction(repo,action,index){const x=action.data||{};if(action.action==='create_transaction')return`${index}. ${TYPES[x.type]||'تراکنش'} ${x.amount?moneyFa(x.amount):''}${x.description?` — ${tgEscape(x.description)}`:''}`;if(action.action==='create_person')return`${index}. ساخت شخص: ${tgEscape(x.name||'')}`;if(action.action==='create_project')return`${index}. ساخت پروژه: ${tgEscape(x.name||'')}`;if(action.action==='edit_transaction')return`${index}. ✏️ ویرایش تراکنش ${tgEscape(String(x.transaction_id||'').slice(0,8))}`;if(action.action==='delete_transaction')return`${index}. 🗑 حذف تراکنش ${tgEscape(String(x.transaction_id||'').slice(0,8))}`;if(action.action==='pay_installment'){const p=x.installment_id?await repo.getById('Installments',x.installment_id):null;return`${index}. پرداخت قسط ${tgEscape(p?.title||'')}${x.amount?` — ${moneyFa(x.amount)}`:''}`;}if(action.action==='settle_debt')return`${index}. تسویه ${x.amount?moneyFa(x.amount):''}`;return`${index}. اقدام مالی`;}
 async function showAiResult(repo,env,chatId,mid,result,url,originalText=''){
-  if(result.kind==='actions'){const lines=[];for(let i=0;i<result.actions.length;i++)lines.push(await formatAiAction(repo,result.actions[i],i+1));return panel(env,chatId,mid,`🤖 <b>${result.actions.length.toLocaleString('fa-IR')} اقدام پیشنهادی</b>\n\n${lines.join('\n')}`,kb([[btn('✅ تأیید همه',`aiok:${result.draft_id}`),btn('❌ لغو',`aicancel:${result.draft_id}`)],[btn('خروج از دستیار','ai:exit')]]));}
+  if(result.kind==='actions'){const lines=[];for(let i=0;i<result.actions.length;i++)lines.push(await formatAiAction(repo,result.actions[i],i+1));const removeRows=result.actions.slice(0,8).map((_,i)=>[btn(`🗑 حذف مورد ${i+1}`,`aidel:${result.draft_id}:${i}`)]);return panel(env,chatId,mid,`🤖 <b>${result.actions.length.toLocaleString('fa-IR')} اقدام پیشنهادی</b>\n\n${lines.join('\n')}\n\nقبل از ثبت می‌توانی پیشنهاد را اصلاح یا یک مورد را حذف کنی.`,kb([[btn('✅ تأیید همه',`aiok:${result.draft_id}`),btn('✏️ اصلاح',`aiedit:${result.draft_id}`)],...removeRows,[btn('❌ لغو همه',`aicancel:${result.draft_id}`),btn('خروج از دستیار','ai:exit')]]));}
   if(result.kind==='split'){const rows=result.result.items.map(x=>`${tgEscape(x.name)} | پرداخت ${moneyFa(x.paid_amount)} | سهم ${moneyFa(x.share_amount)} | مانده ${moneyFa(x.balance)}`).join('\n'),settles=result.result.settlements.map(x=>`${tgEscape(x.from.name)} → ${tgEscape(x.to.name)}: ${moneyFa(x.amount)}`).join('\n');return panel(env,chatId,mid,`🤖 <b>دنگ</b>\n${rows}\n\n${settles||'تسویه‌ای لازم نیست.'}`,kb([[web('ذخیره/تبدیل به طلب',webAppUrl(env,url))],[btn('خروج از دستیار','ai:exit')]]));}
   if(result.kind==='clarify'&&Array.isArray(result.options)&&result.options.length){
     if(result.entity==='person'||result.entity==='merchant'){const prefix=result.entity==='person'?'airead:p:':'airead:m:',buttons=result.options.slice(0,8).map(o=>[btn(o.name||String(o),`${prefix}${o.id}`)]);buttons.push([btn('خروج از دستیار','ai:exit')]);return panel(env,chatId,mid,`🤖 ${tgEscape(result.text)}`,kb(buttons));}
