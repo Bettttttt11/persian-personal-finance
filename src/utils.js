@@ -1,5 +1,6 @@
-export const SCHEMA_VERSION = 6;
-export const DEFAULT_CURRENCY = 'TOMAN';
+export const SCHEMA_VERSION = 7;
+export const DEFAULT_CURRENCY = 'IRR';
+export const STORAGE_CURRENCY = 'IRR';
 export const SESSION_TIMEOUTS = { '15m': 900, '30m': 1800, '1h': 3600, manual: null };
 
 export function uuid() { return crypto.randomUUID(); }
@@ -16,7 +17,10 @@ export function parseMoney(v) {
   if(!/^-?\d+$/.test(s)) throw new Error('INVALID_MONEY');
   const n=Number(s); if(!Number.isSafeInteger(n)) throw new Error('INVALID_MONEY'); return n;
 }
-export function moneyFa(n=0) { return Number(n||0).toLocaleString('fa-IR')+' تومان'; }
+export function currencyCode(v=DEFAULT_CURRENCY){ const s=String(v||'').trim().toUpperCase(); return s==='TOMAN'?'TOMAN':'IRR'; }
+export function toRial(n=0,inputCurrency=DEFAULT_CURRENCY){ const value=Number(n||0); if(!Number.isFinite(value))return 0; return currencyCode(inputCurrency)==='TOMAN'?value*10:value; }
+export function fromRial(n=0,displayCurrency=DEFAULT_CURRENCY){ const value=Number(n||0); if(!Number.isFinite(value))return 0; return currencyCode(displayCurrency)==='TOMAN'?value/10:value; }
+export function moneyFa(n=0,currency=DEFAULT_CURRENCY) { const value=fromRial(n,currency),label=currencyCode(currency)==='TOMAN'?'تومان':'ریال'; return value.toLocaleString('fa-IR',{maximumFractionDigits:1})+' '+label; }
 export function bool(v) { if(v===true || v===1)return true; const s=String(v??'').trim().toLowerCase(); return s==='true' || s==='1' || s==='yes' || s==='on'; }
 export function safeJsonParse(v, fallback=null) { try { return typeof v==='string' ? JSON.parse(v) : v ?? fallback; } catch { return fallback; } }
 export function json(v) { return JSON.stringify(v ?? null); }
@@ -37,7 +41,7 @@ export function securityHeaders() { return {'x-content-type-options':'nosniff','
 export function bad(message='درخواست نامعتبر است.',status=400,code='BAD_REQUEST') { return responseJson({ok:false,error:{code,message}},status); }
 export function ok(data={}) { return responseJson({ok:true,...data}); }
 export function userError(err) {
-  const map={INVALID_MONEY:'مبلغ معتبر نیست.',UNAUTHORIZED:'دسترسی مجاز نیست.',PIN_LOCKED:'ورود موقتاً قفل شده است.',PIN_WRONG:'رمز نادرست است.',NOT_FOUND:'مورد پیدا نشد.',VALIDATION:'اطلاعات واردشده معتبر نیست.',AI_DISABLED:'مدل هوش مصنوعی تنظیم نشده است.',AI_FAILED:'پاسخ هوش مصنوعی قابل استفاده نبود.',AI_INVALID_JSON:'پاسخ ساختاری هوش مصنوعی معتبر نبود.',AI_INVALID_ACTION:'عملیات پیشنهادی هوش مصنوعی معتبر نیست.',R2_DISABLED:'فضای فایل تنظیم نشده است.',CONFIG_SESSION_SECRET:'تنظیم امنیت Session کامل نیست.',IMPORT_REVIEW_REQUIRED:'این مورد باید قبل از ثبت بررسی شود.'};
+  const map={INVALID_MONEY:'مبلغ معتبر نیست.',ENTITY_IN_USE:'این مورد در اطلاعات مالی دیگر استفاده شده است؛ برای حفظ سابقه می‌توانید آن را در سطل زباله نگه دارید یا ابتدا ارجاع‌ها را تغییر دهید.',UNAUTHORIZED:'دسترسی مجاز نیست.',PIN_LOCKED:'ورود موقتاً قفل شده است.',PIN_WRONG:'رمز نادرست است.',NOT_FOUND:'مورد پیدا نشد.',VALIDATION:'اطلاعات واردشده معتبر نیست.',AI_DISABLED:'مدل هوش مصنوعی تنظیم نشده است.',AI_FAILED:'پاسخ هوش مصنوعی قابل استفاده نبود.',AI_INVALID_JSON:'پاسخ ساختاری هوش مصنوعی معتبر نبود.',AI_INVALID_ACTION:'عملیات پیشنهادی هوش مصنوعی معتبر نیست.',R2_DISABLED:'فضای فایل تنظیم نشده است.',CONFIG_SESSION_SECRET:'تنظیم امنیت Session کامل نیست.',IMPORT_REVIEW_REQUIRED:'این مورد باید قبل از ثبت بررسی شود.'};
   return map[err?.message] || 'خطایی رخ داد. دوباره تلاش کنید.';
 }
 export function redactError(err) { return {name:err?.name||'Error',message:String(err?.message||'error').slice(0,180)}; }

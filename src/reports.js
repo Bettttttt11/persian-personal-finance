@@ -1,5 +1,5 @@
 import { bool, normalizeText, safeJsonParse } from './utils.js';
-import { formatJalali, jalaliMonthRange } from './jalali.js';
+import { formatJalali, jalaliMonthRange, tehranToday } from './jalali.js';
 
 function inRange(t,from,to){const d=String(t.transaction_date_iso||'');return(!from||d>=from)&&(!to||d<=to);}
 function confirmed(t){return String(t.status||'confirmed')==='confirmed';}
@@ -62,6 +62,7 @@ export function summarize(txs){
 }
 
 export async function report(repo,{from,to,...filters}={}){
+  if(!from&&!to){const range=jalaliMonthRange(),today=tehranToday();from=range.start;to=range.end<today?range.end:today;}
   const txs=await queryTransactions(repo,{from,to,...filters}),summary=summarize(txs),maps=await lookupMaps(repo);
   const categories=Object.entries(summary.by_category).map(([id,amount])=>({category_id:id,name:maps.categories[id]||'بدون دسته',amount})).sort((a,b)=>b.amount-a.amount);
   return{from,to,summary:{...summary,by_category:undefined},categories,transactions:txs};
@@ -75,7 +76,7 @@ function budgetApplies(budget,range){
   const j=formatJalali(range.start).slice(0,7);return p===j;
 }
 export async function budgetProgress(repo,range,txs){
-  const budgets=await repo.list('Budgets',{limit:1000,filter:x=>String(x.active)!=='false'&&budgetApplies(x,range)}),defaults=await repo.setting('budget_thresholds',[80,90,100]),items=[];
+  const budgets=await repo.list('Budgets',{limit:1000,filter:x=>!bool(x.is_deleted)&&bool(x.active)&&budgetApplies(x,range)}),defaults=await repo.setting('budget_thresholds',[80,90,100]),items=[];
   for(const b of budgets){
     let selected=txs;if(b.scope_type==='category')selected=txs.filter(t=>t.category_id===b.scope_id);else if(b.scope_type==='project')selected=txs.filter(t=>t.project_id===b.scope_id);
     const used=summarize(selected).net_expense,amount=Number(b.amount||0),percent=amount>0?Math.round(used*1000/amount)/10:0,thresholds=safeJsonParse(b.warning_thresholds_json,defaults);
@@ -88,9 +89,9 @@ export async function dashboard(repo,finance){
   const period=jalaliMonthRange();
   const [rep,accounts,installments,debts,inbox]=await Promise.all([
     report(repo,{from:period.start,to:period.end}),
-    repo.list('Accounts',{limit:500,filter:x=>String(x.archived)!=='true'}),
-    repo.list('Installments',{limit:500,filter:x=>x.status!=='completed'&&String(x.archived)!=='true'}),
-    repo.list('Debts',{limit:2000,filter:x=>x.kind==='receivable'&&x.status!=='settled'}),
+    repo.list('Accounts',{limit:500,filter:x=>!bool(x.is_deleted)&&!bool(x.archived)}),
+    repo.list('Installments',{limit:500,filter:x=>!bool(x.is_deleted)&&x.status!=='completed'&&!bool(x.archived)}),
+    repo.list('Debts',{limit:2000,filter:x=>!bool(x.is_deleted)&&x.kind==='receivable'&&x.status!=='settled'}),
     repo.list('Inbox',{limit:2000,filter:x=>x.status==='pending'})
   ]);
   const [balanceMap,budgets]=await Promise.all([finance.accountBalances(accounts.map(a=>a.account_id)),budgetProgress(repo,period,rep.transactions)]);
@@ -99,14 +100,14 @@ export async function dashboard(repo,finance){
 }
 
 export async function personSummary(repo,personId){
-  const txs=await queryTransactions(repo,{person_id:personId}),debts=await repo.list('Debts',{limit:5000,filter:x=>x.person_id===personId});let spent=0,received=0,receivable=0,debt=0;
+  const txs=await queryTransactions(repo,{person_id:personId}),debts=await repo.list('Debts',{limit:5000,filter:x=>!bool(x.is_deleted)&&x.person_id===personId});let spent=0,received=0,receivable=0,debt=0;
   for(const t of txs){const meta=safeJsonParse(t.metadata_json,{});if(t.type==='expense'||t.type==='receivable')spent+=Number(t.amount||0);if(t.type==='income')received+=Number(t.amount||0);}
   for(const d of debts){const rem=Math.max(0,Number(d.principal_amount||0)-Number(d.settled_amount||0));if(d.kind==='receivable')receivable+=rem;else debt+=rem;}
   return{spent,received,receivable,debt,balance:receivable-debt,transactions:txs,debts};
 }
 
 export async function projectSummary(repo,projectId){
-  const project=await repo.getById('Projects',projectId);if(!project)throw new Error('NOT_FOUND');const txs=await queryTransactions(repo,{project_id:projectId}),summary=summarize(txs),ids=new Set(txs.map(t=>t.transaction_id));
+  const project=await repo.getById('Projects',projectId);if(!project||bool(project.is_deleted))throw new Error('NOT_FOUND');const txs=await queryTransactions(repo,{project_id:projectId}),summary=summarize(txs),ids=new Set(txs.map(t=>t.transaction_id));
   const [receipts,splits,joins,tags,people]=await Promise.all([repo.list('Receipts',{limit:10000,filter:r=>ids.has(r.transaction_id)}),repo.list('Splits',{limit:2000,filter:x=>x.project_id===projectId}),repo.list('EntityTags',{limit:20000,filter:x=>x.entity_type==='transaction'&&ids.has(x.entity_id)}),repo.list('Tags',{limit:5000}),repo.list('People',{limit:5000})]);
   const tagMap=Object.fromEntries(tags.map(t=>[t.tag_id,t])),personMap=Object.fromEntries(people.map(p=>[p.person_id,p])),tagIds=[...new Set(joins.map(j=>j.tag_id))],personIds=[...new Set(txs.map(t=>t.person_id).filter(Boolean))];
   const budget=Number(project.budget||0),used=summary.net_expense;return{project,...summary,transactions:txs,receipt_count:receipts.length,receipts,splits,tags:tagIds.map(id=>tagMap[id]).filter(Boolean),people:personIds.map(id=>personMap[id]).filter(Boolean),budget:{amount:budget,used,remaining:budget?Math.max(0,budget-used):null,percent:budget?Math.round(used*1000/budget)/10:null}};

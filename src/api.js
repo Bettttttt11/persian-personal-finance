@@ -8,8 +8,8 @@ import { createBackup, previewRestore, applyRestore } from './backup.js';
 import { undoLast } from './audit.js';
 import { getCapabilities, handleAiText, confirmAiActions, extractReceipt, analyzePdf } from './ai.js';
 import { saveReceipt, replaceWithWebp, getPrivate, putPrivate, deleteReceipt, saveInboxFile, storageStats, hasR2, probePrivateStorage, storageKind } from './storage.js';
-import { telegramCall } from './telegram-api.js';
-import { SCHEMA_VERSION, bad, bool, clearCookie as clearCookieUtil, corsHeaders, nowIso, ok, safeJsonParse, securityHeaders, toCsv, userError, uuid } from './utils.js';
+import { telegramCall, telegramSendDocument } from './telegram-api.js';
+import { DEFAULT_CURRENCY, SCHEMA_VERSION, bad, bool, clearCookie as clearCookieUtil, corsHeaders, currencyCode, fromRial, nowIso, ok, safeJsonParse, securityHeaders, toCsv, toRial, userError, uuid } from './utils.js';
 import { parseDateInput } from './jalali.js';
 
 const ENTITY_ALLOWED=new Set(Object.keys(ENTITY_MAP));
@@ -17,7 +17,7 @@ const ALLOWED_SETTINGS=new Set(['session_timeout','keep_original_receipts','rece
 
 function base(env,request){return env.PUBLIC_BASE_URL||new URL(request.url).origin;}
 function withCors(response,request,env){const headers=new Headers(response.headers);for(const [key,value] of Object.entries(corsHeaders(request,base(env,request))))headers.set(key,value);return new Response(response.body,{status:response.status,statusText:response.statusText,headers});}
-function payloadError(error){const status=error.message==='UNAUTHORIZED'?401:error.message==='NOT_FOUND'?404:error.message==='PIN_LOCKED'?429:error.message==='IMPORT_REVIEW_REQUIRED'?409:400;return bad(userError(error),status,error.message||'ERROR');}
+function payloadError(error){const status=error.message==='UNAUTHORIZED'?401:error.message==='NOT_FOUND'?404:error.message==='PIN_LOCKED'?429:['IMPORT_REVIEW_REQUIRED','ENTITY_IN_USE'].includes(error.message)?409:400;return bad(userError(error),status,error.message||'ERROR');}
 async function bodyJson(request){try{return await request.json();}catch{throw new Error('VALIDATION');}}
 function cleanForClient(row){if(!row)return row;const out={...row};delete out.__row;delete out.token_hash;return out;}
 function cleanDeep(value){if(Array.isArray(value))return value.map(cleanDeep);if(value&&typeof value==='object'){const out={};for(const [key,item] of Object.entries(value)){if(key==='__row'||key==='token_hash')continue;out[key]=cleanDeep(item);}return out;}return value;}
@@ -50,6 +50,7 @@ export async function handleApi(request,env){
     }
     const auth=await authenticateMiniApi(request,repo,env);
     if(request.method==='GET'&&path==='/api/dashboard')await repo.prefetch(['Transactions','Accounts','Categories','People','Projects','Merchants','Tags','Installments','Debts','Inbox','Budgets','Settings']);
+    else if(request.method==='GET'&&path==='/api/lookups')await repo.prefetch(['Accounts','Categories','People','Projects','Tags','Merchants','Installments']);
     else if(request.method==='GET'&&path==='/api/transactions'){const names=['Transactions'];if(url.searchParams.get('tag_id')||url.searchParams.get('q'))names.push('EntityTags','Tags');if(url.searchParams.get('q'))names.push('Accounts','Categories','People','Projects','Merchants');await repo.prefetch(names);}
     const finance=new FinanceService(repo,'owner');
     if(path==='/api/auth/logout'&&request.method==='POST'){
@@ -62,6 +63,7 @@ export async function handleApi(request,env){
     else if(path==='/api/admin/telegram-webhook'&&request.method==='POST'){const webhookUrl=`${base(env,request).replace(/\/$/,'')}/telegram`,payload={url:webhookUrl,allowed_updates:['message','callback_query']};if(env.TELEGRAM_WEBHOOK_SECRET)payload.secret_token=env.TELEGRAM_WEBHOOK_SECRET;result=await telegramCall(env,'setWebhook',payload);}
     else if(path==='/api/health'&&request.method==='GET')result=await health(repo,env);
     else if(path==='/api/dashboard'&&request.method==='GET')result=await dashboard(repo,finance);
+    else if(path==='/api/lookups'&&request.method==='GET')result=await lookupBundle(repo);
 
     else if(path==='/api/transactions'&&request.method==='GET'){
       const page=paginate(url),all=await queryTransactions(repo,filtersFrom(url));result={items:all.slice(page.offset,page.offset+page.limit).map(cleanForClient),total:all.length,...page};
@@ -83,7 +85,7 @@ export async function handleApi(request,env){
     }else if(path==='/api/reports'&&request.method==='GET')result=await report(repo,filtersFrom(url));
     else if(path==='/api/reports/compare'&&request.method==='GET')result=await comparePeriods(repo,{from:url.searchParams.get('from')||'',to:url.searchParams.get('to')||''},{from:url.searchParams.get('previous_from')||'',to:url.searchParams.get('previous_to')||''});
     else if(path==='/api/accounts/balances'&&request.method==='GET'){
-      const rows=await repo.list('Accounts',{limit:1000}),balances=await finance.accountBalances(rows.map(x=>x.account_id));result={items:rows.map(account=>({...cleanForClient(account),balance:Number(balances[account.account_id]||0)}))};
+      const rows=await repo.list('Accounts',{limit:1000,includeDeleted:false}),balances=await finance.accountBalances(rows.map(x=>x.account_id));result={items:rows.map(account=>({...cleanForClient(account),balance:Number(balances[account.account_id]||0)}))};
     }else if(/^\/api\/accounts\/[^/]+\/transactions$/.test(path)&&request.method==='GET'){
       const id=path.split('/')[3],all=await queryTransactions(repo,{}),items=all.filter(x=>x.account_id===id||x.destination_account_id===id);result={items:items.slice(0,200).map(cleanForClient),total:items.length};
     }else if(/^\/api\/people\/[^/]+\/summary$/.test(path)&&request.method==='GET')result=await personSummary(repo,path.split('/')[3]);
@@ -126,7 +128,9 @@ export async function handleApi(request,env){
     }else if(/^\/api\/restore\/receipts\/[^/]+$/.test(path)&&request.method==='POST')result=await restoreReceiptFiles(request,repo,env,path.split('/')[4]);
 
     else if(path==='/api/export/csv'&&request.method==='GET'){
-      const transactions=await queryTransactions(repo,filtersFrom(url));return withCors(new Response(toCsv(transactions,SHEETS.Transactions),{headers:{'content-type':'text/csv; charset=utf-8','content-disposition':'attachment; filename="transactions.csv"',...securityHeaders()}}),request,env);
+      const transactions=await queryTransactions(repo,filtersFrom(url)),displayCurrency=currencyCode(url.searchParams.get('display_currency')||await repo.setting('default_currency',DEFAULT_CURRENCY)),rows=transactions.map(t=>({...t,amount:fromRial(t.amount,displayCurrency),fee_amount:fromRial(t.fee_amount,displayCurrency),currency:displayCurrency}));return withCors(new Response(toCsv(rows,SHEETS.Transactions),{headers:{'content-type':'text/csv; charset=utf-8','content-disposition':'attachment; filename="transactions.csv"',...securityHeaders()}}),request,env);
+    }else if(path==='/api/telegram/send-document'&&request.method==='POST'){
+      const form=await request.formData(),file=form.get('file');if(!(file instanceof File)||file.size<=0||file.size>45*1024*1024)throw new Error('VALIDATION');const caption=String(form.get('caption')||'');result={sent:true,message:await telegramSendDocument(env,env.OWNER_TELEGRAM_ID,await file.arrayBuffer(),{filename:file.name||'finance-export.bin',mime:file.type||'application/octet-stream',caption})};
     }
 
     else if(path==='/api/receipts'&&request.method==='POST')result=await uploadReceipt(request,repo,env);
@@ -155,13 +159,12 @@ export async function handleApi(request,env){
       const form=await request.formData(),file=form.get('file');if(!(file instanceof File))throw new Error('VALIDATION');result=await analyzePdf(repo,env,await file.arrayBuffer(),file.name);
     }
 
-    else if(path==='/api/splits/calculate'&&request.method==='POST')result=calculateSplit(await bodyJson(request));
-    else if(path==='/api/splits'&&request.method==='POST')result=await saveSplit(repo,await bodyJson(request));
+    else if(path==='/api/splits/calculate'&&request.method==='POST'){const body=await bodyJson(request),cur=body.input_currency||body.currency||await repo.setting('default_currency',DEFAULT_CURRENCY);result=calculateSplit(normalizeSplitMoney(body,cur));}
+    else if(path==='/api/splits'&&request.method==='POST'){const body=await bodyJson(request),cur=body.input_currency||body.currency||await repo.setting('default_currency',DEFAULT_CURRENCY);result=await saveSplit(repo,normalizeSplitMoney(body,cur));}
     else if(/^\/api\/splits\/[^/]+\/receivables$/.test(path)&&request.method==='POST')result=await splitToReceivables(repo,finance,path.split('/')[3],await bodyJson(request));
 
-    else if(path==='/api/trash'&&request.method==='GET'){
-      const rows=await repo.list('Transactions',{limit:10000,filter:x=>bool(x.is_deleted),sort:(a,b)=>String(b.deleted_at).localeCompare(String(a.deleted_at))});result={items:rows.map(cleanForClient)};
-    }else if(/^\/api\/merge\/[^/]+$/.test(path)&&request.method==='POST'){
+    else if(path==='/api/trash'&&request.method==='GET')result=await trashItems(repo);
+    else if(/^\/api\/merge\/[^/]+$/.test(path)&&request.method==='POST'){
       const name=path.split('/')[3],sheet=ENTITY_MAP[name];if(!sheet)throw new Error('VALIDATION');const body=await bodyJson(request);if(body.confirm!=='MERGE')throw new Error('VALIDATION');result=await finance.merge(sheet,body.primary_id,body.duplicate_id);
     }else{
       const generic=await genericEntity(path,request,repo,url);if(generic.handled)result=generic.result;else return withCors(bad('مسیر پیدا نشد.',404,'NOT_FOUND'),request,env);
@@ -175,7 +178,7 @@ function validateSetting(key,value){
   if(key==='receipt_quality'&&(!Number.isInteger(Number(value))||Number(value)<40||Number(value)>95))throw new Error('VALIDATION');
   if(key==='receipt_max_side'&&(!Number.isInteger(Number(value))||Number(value)<600||Number(value)>2400))throw new Error('VALIDATION');
   if(key==='keep_original_receipts'&&typeof value!=='boolean')throw new Error('VALIDATION');
-  if(key==='default_currency'&&value!=='TOMAN')throw new Error('VALIDATION');
+  if(key==='default_currency'&&!['IRR','TOMAN'].includes(String(value||'').toUpperCase()))throw new Error('VALIDATION');
   if(key==='budget_thresholds'){
     if(!Array.isArray(value)||!value.length||value.some(x=>!Number.isFinite(Number(x))||Number(x)<=0||Number(x)>100))throw new Error('VALIDATION');
     const normalized=[...new Set(value.map(Number))].sort((a,b)=>a-b);if(normalized.length!==value.length)throw new Error('VALIDATION');
@@ -187,7 +190,10 @@ function validateSetting(key,value){
   if(key.startsWith('openrouter_')&&key.endsWith('_model')&&value!==null&&typeof value!=='string')throw new Error('VALIDATION');
   if(key==='default_account'&&value!==null&&typeof value!=='string')throw new Error('VALIDATION');
 }
-async function publicSettings(repo,env){const out={};for(const key of ALLOWED_SETTINGS)out[key]=await repo.setting(key,null);out.storage_configured=hasR2(env);out.storage_kind=storageKind(env);out.r2_configured=hasR2(env);out.openrouter_configured=!!env.OPENROUTER_API_KEY;return out;}
+async function publicSettings(repo,env){const out={};for(const key of ALLOWED_SETTINGS)out[key]=await repo.setting(key,key==='default_currency'?DEFAULT_CURRENCY:null);out.storage_currency=await repo.setting('storage_currency','IRR');out.storage_configured=hasR2(env);out.storage_kind=storageKind(env);out.r2_configured=hasR2(env);out.openrouter_configured=!!env.OPENROUTER_API_KEY;return out;}
+const ENTITY_MONEY_FIELDS={Accounts:['opening_balance'],Projects:['budget'],Installments:['total_amount','default_installment_amount'],Recurring:['amount'],Budgets:['amount'],Debts:['principal_amount','settled_amount']};
+function normalizeEntityMoney(sheet,row,inputCurrency=DEFAULT_CURRENCY){for(const key of ENTITY_MONEY_FIELDS[sheet]||[]){if(row[key]===undefined||row[key]==='')continue;const n=Number(row[key]);if(!Number.isSafeInteger(n)||n<0)throw new Error('INVALID_MONEY');row[key]=toRial(n,inputCurrency);}return row;}
+function normalizeSplitMoney(body,inputCurrency=DEFAULT_CURRENCY){const currency=currencyCode(inputCurrency),out={...body,total_amount:toRial(Number(body.total_amount||0),currency)};out.items=(body.items||[]).map(x=>({...x,paid_amount:toRial(Number(x.paid_amount||0),currency),share_value:body.mode==='custom'?toRial(Number(x.share_value||0),currency):x.share_value}));return out;}
 function validateEntityInput(sheet,row){
   const moneyFields={Accounts:['opening_balance'],Projects:['budget'],Installments:['total_amount','default_installment_amount'],Recurring:['amount'],Budgets:['amount'],Debts:['principal_amount','settled_amount']}[sheet]||[];
   for(const key of moneyFields)if(row[key]!==undefined&&row[key]!==''){const n=Number(row[key]);if(!Number.isSafeInteger(n)||n<0)throw new Error('INVALID_MONEY');row[key]=n;}
@@ -199,19 +205,44 @@ function validateEntityInput(sheet,row){
   if(sheet==='Installments'&&row.total_amount!==undefined&&row.default_installment_amount!==undefined&&Number(row.default_installment_amount)>Number(row.total_amount))throw new Error('VALIDATION');return row;
 }
 function entityDefaults(sheet,row){
-  if(['Accounts','Categories','People','Projects','Tags','Merchants','Templates'].includes(sheet)){if(row.archived===undefined)row.archived=false;if(row.favorite===undefined&&['Accounts','Categories','People','Projects','Tags','Merchants','Templates'].includes(sheet))row.favorite=false;}
-  if(sheet==='Projects'&&!row.status)row.status='active';if(sheet==='Installments'){if(!row.status)row.status='active';if(row.is_deleted===undefined)row.is_deleted=false;}if(sheet==='Rules'&&row.enabled===undefined)row.enabled=true;if(sheet==='Recurring'&&row.enabled===undefined)row.enabled=true;if(sheet==='Budgets'&&row.active===undefined)row.active=true;return row;
+  if(['Accounts','Categories','People','Projects','Tags','Merchants','Templates'].includes(sheet)){if(row.archived===undefined)row.archived=false;if(row.favorite===undefined)row.favorite=false;}
+  if(SHEETS[sheet]?.includes('is_deleted')&&row.is_deleted===undefined)row.is_deleted=false;if(SHEETS[sheet]?.includes('deleted_at')&&row.deleted_at===undefined)row.deleted_at='';
+  if(sheet==='Projects'&&!row.status)row.status='active';if(sheet==='Installments'&&!row.status)row.status='active';if(sheet==='Rules'&&row.enabled===undefined)row.enabled=true;if(sheet==='Recurring'&&row.enabled===undefined)row.enabled=true;if(sheet==='Budgets'&&row.active===undefined)row.active=true;return row;
 }
 async function genericEntity(path,request,repo,url){
-  const match=path.match(/^\/api\/entities\/([^/]+)(?:\/([^/]+))?(?:\/(archive|restore))?$/);if(!match||!ENTITY_ALLOWED.has(match[1]))return{handled:false};
-  const sheet=ENTITY_MAP[match[1]],id=match[2],action=match[3],idField=ID_FIELD[sheet];
-  if(request.method==='GET'&&!id){const page=paginate(url),rows=await repo.list(sheet,{limit:5000,filter:x=>(sheet!=='Installments'||!bool(x.is_deleted))&&(url.searchParams.get('archived')==='all'||String(x.archived)!=='true'),sort:(a,b)=>Number(String(b.favorite)==='true')-Number(String(a.favorite)==='true')||String(a.name||a.title||'').localeCompare(String(b.name||b.title||''),'fa')});return{handled:true,result:{items:rows.slice(page.offset,page.offset+page.limit).map(cleanForClient),total:rows.length}};}
+  const match=path.match(/^\/api\/entities\/([^/]+)(?:\/([^/]+))?(?:\/(archive|restore|undelete))?$/);if(!match||!ENTITY_ALLOWED.has(match[1]))return{handled:false};
+  const name=match[1],sheet=ENTITY_MAP[name],id=match[2],action=match[3],idField=ID_FIELD[sheet];
+  if(request.method==='GET'&&!id){const page=paginate(url),rows=await repo.list(sheet,{limit:5000,filter:x=>!bool(x.is_deleted)&&(url.searchParams.get('archived')==='all'||!bool(x.archived)),sort:(a,b)=>Number(bool(b.favorite))-Number(bool(a.favorite))||String(a.name||a.title||'').localeCompare(String(b.name||b.title||''),'fa')});return{handled:true,result:{items:rows.slice(page.offset,page.offset+page.limit).map(cleanForClient),total:rows.length}};}
   if(request.method==='GET'&&id)return{handled:true,result:cleanForClient(await repo.getById(sheet,id))};
-  if(request.method==='POST'&&!id){const body=await bodyJson(request),headers=await repo.headers(sheet),row={};for(const header of headers)if(body[header]!==undefined&&!['__row','created_at','updated_at','schema_version'].includes(header))row[header]=body[header];if(!row[idField])row[idField]=uuid();entityDefaults(sheet,row);validateEntityInput(sheet,row);row.created_at=nowIso();row.updated_at=nowIso();row.schema_version=SCHEMA_VERSION;return{handled:true,result:await repo.insert(sheet,row)};}
-  if(request.method==='PATCH'&&id&&!action){const body=await bodyJson(request),headers=await repo.headers(sheet),patch={};for(const header of headers)if(body[header]!==undefined&&!['__row',idField,'created_at','schema_version'].includes(header))patch[header]=body[header];validateEntityInput(sheet,patch);return{handled:true,result:await repo.updateById(sheet,id,patch)};}
+  if(request.method==='POST'&&!id){const body=await bodyJson(request),headers=await repo.headers(sheet),row={};for(const header of headers)if(body[header]!==undefined&&!['__row','created_at','updated_at','schema_version'].includes(header))row[header]=body[header];if(!row[idField])row[idField]=uuid();entityDefaults(sheet,row);normalizeEntityMoney(sheet,row,currencyCode(body.input_currency||DEFAULT_CURRENCY));validateEntityInput(sheet,row);row.created_at=nowIso();row.updated_at=nowIso();row.schema_version=SCHEMA_VERSION;return{handled:true,result:await repo.insert(sheet,row)};}
+  if(request.method==='PATCH'&&id&&!action){const body=await bodyJson(request),headers=await repo.headers(sheet),patch={};for(const header of headers)if(body[header]!==undefined&&!['__row',idField,'created_at','schema_version'].includes(header))patch[header]=body[header];normalizeEntityMoney(sheet,patch,currencyCode(body.input_currency||DEFAULT_CURRENCY));validateEntityInput(sheet,patch);return{handled:true,result:await repo.updateById(sheet,id,patch)};}
+  if(request.method==='DELETE'&&id&&!action){const row=await repo.getById(sheet,id);if(!row)throw new Error('NOT_FOUND');if(url.searchParams.get('permanent')==='true'){const phrase=`DELETE ${id}`;if(request.headers.get('x-confirm-permanent-delete')!==phrase||!bool(row.is_deleted))throw new Error('VALIDATION');await assertEntityCanPermanentlyDelete(repo,sheet,id);return{handled:true,result:{deleted:await repo.permanentDelete(sheet,id)}};}if(!SHEETS[sheet]?.includes('is_deleted'))throw new Error('VALIDATION');return{handled:true,result:await repo.softDelete(sheet,id)};}
   if(request.method==='POST'&&id&&action==='archive'){if(!(await repo.headers(sheet)).includes('archived'))throw new Error('VALIDATION');return{handled:true,result:await repo.archive(sheet,id,true)};}
   if(request.method==='POST'&&id&&action==='restore'){if(!(await repo.headers(sheet)).includes('archived'))throw new Error('VALIDATION');return{handled:true,result:await repo.archive(sheet,id,false)};}
+  if(request.method==='POST'&&id&&action==='undelete'){if(!(await repo.headers(sheet)).includes('is_deleted'))throw new Error('VALIDATION');return{handled:true,result:await repo.restore(sheet,id)};}
   return{handled:false};
+}
+
+async function lookupBundle(repo){
+  const names=['accounts','categories','people','projects','tags','merchants','installments'],out={};for(const name of names){const sheet=ENTITY_MAP[name],rows=await repo.list(sheet,{limit:5000,filter:x=>!bool(x.is_deleted)&&!bool(x.archived),sort:(a,b)=>Number(bool(b.favorite))-Number(bool(a.favorite))||String(a.name||a.title||'').localeCompare(String(b.name||b.title||''),'fa')});out[name]=rows.map(cleanForClient);}return out;
+}
+const REF_CHECKS={
+  Accounts:[['Transactions',['account_id','destination_account_id']],['Installments',['account_id']],['Recurring',['account_id']],['Templates',['account_id']],['Imports',['account_id']],['DebtPayments',['account_id']]],
+  Categories:[['Transactions',['category_id']],['Recurring',['category_id']],['Templates',['category_id']],['Merchants',['default_category_id']]],
+  People:[['Transactions',['person_id']],['Debts',['person_id']],['Installments',['person_id']],['Recurring',['person_id']],['SplitItems',['person_id']]],
+  Projects:[['Transactions',['project_id']],['Debts',['project_id']],['Installments',['project_id']],['Recurring',['project_id']],['Splits',['project_id']],['Templates',['project_id']],['Merchants',['default_project_id']]],
+  Tags:[['EntityTags',['tag_id']]],Merchants:[['Transactions',['merchant_id']],['Recurring',['merchant_id']],['Templates',['merchant_id']]],
+  Installments:[['InstallmentPayments',['installment_id']]],Debts:[['DebtPayments',['debt_id']]]
+};
+async function assertEntityCanPermanentlyDelete(repo,sheet,id){
+  for(const [target,fields] of REF_CHECKS[sheet]||[]){const hit=await repo.findOne(target,row=>fields.some(f=>String(row[f]||'')===String(id)));if(hit)throw new Error('ENTITY_IN_USE');}
+  if(['Categories','Projects'].includes(sheet)){const scope=sheet==='Categories'?'category':'project',hit=await repo.findOne('Budgets',x=>String(x.scope_type)===scope&&String(x.scope_id)===String(id));if(hit)throw new Error('ENTITY_IN_USE');}
+  if(['Installments','Debts'].includes(sheet)){const type=sheet==='Installments'?'installment':'debt',hit=await repo.findOne('Links',x=>(x.from_type===type&&String(x.from_id)===String(id))||(x.to_type===type&&String(x.to_id)===String(id)));if(hit)throw new Error('ENTITY_IN_USE');}
+}
+async function trashItems(repo){
+  const txs=await repo.list('Transactions',{limit:10000,filter:x=>bool(x.is_deleted)}),items=txs.map(x=>({...cleanForClient(x),trash_kind:'transaction',entity_name:'transactions',entity_id:x.transaction_id,title:x.description||x.type||'تراکنش'}));
+  for(const [name,sheet] of Object.entries(ENTITY_MAP)){if(!SHEETS[sheet]?.includes('is_deleted'))continue;const rows=await repo.list(sheet,{limit:5000,filter:x=>bool(x.is_deleted)});for(const x of rows)items.push({...cleanForClient(x),trash_kind:'entity',entity_name:name,entity_id:x[ID_FIELD[sheet]],title:x.name||x.title||x.scope_type||sheet});}
+  items.sort((a,b)=>String(b.deleted_at||'').localeCompare(String(a.deleted_at||'')));return{items};
 }
 
 async function replaceTransactionTags(repo,transactionId,tagIds){
@@ -235,9 +266,9 @@ async function receiptAi(repo,env,id){
   const receipt=await repo.getById('Receipts',id);if(!receipt)throw new Error('NOT_FOUND');const object=await getPrivate(env,receipt.object_key);if(!object)throw new Error('NOT_FOUND');const ai=await extractReceipt(repo,env,await object.arrayBuffer(),receipt.mime_type||'image/webp');await repo.updateById('Receipts',id,{ai_status:'review',ai_json:JSON.stringify(ai)},{action:'AI-write'});await repo.insert('Inbox',{inbox_id:uuid(),type:'receipt_ai',entity_type:'receipt',entity_id:id,title:'بررسی استخراج فیش',payload_json:JSON.stringify(ai),status:'pending',created_at:nowIso(),updated_at:nowIso(),schema_version:SCHEMA_VERSION});return ai;
 }
 async function confirmReceiptAi(repo,finance,id,body){
-  if(body.confirm!=='APPLY')throw new Error('VALIDATION');const receipt=await repo.getById('Receipts',id);if(!receipt)throw new Error('NOT_FOUND');const ai={...safeJsonParse(receipt.ai_json,{}),...(body.fields||{})},patch={};
+  if(body.confirm!=='APPLY')throw new Error('VALIDATION');const receipt=await repo.getById('Receipts',id);if(!receipt)throw new Error('NOT_FOUND');const ai={...safeJsonParse(receipt.ai_json,{}),...(body.fields||{})},patch={currency:currencyCode(body.currency||await repo.setting('default_currency',DEFAULT_CURRENCY))};
   if(ai.amount!==undefined&&ai.amount!==null)patch.amount=Number(ai.amount);if(ai.fee!==undefined&&ai.fee!==null)patch.fee_amount=Number(ai.fee);if(ai.date)patch.transaction_date=ai.date;if(ai.tracking_number)patch.tracking_number=String(ai.tracking_number);if(ai.reference_number)patch.reference_number=String(ai.reference_number);if(ai.description)patch.description=String(ai.description);
-  if(ai.merchant){let merchant=await repo.findOne('Merchants',x=>String(x.name||'').trim().toLowerCase()===String(ai.merchant).trim().toLowerCase());if(!merchant)merchant=await repo.insert('Merchants',{merchant_id:uuid(),name:String(ai.merchant).trim(),default_category_id:'',default_project_id:'',default_tags_json:'[]',icon:'',color:'',favorite:false,archived:false,created_at:nowIso(),updated_at:nowIso(),schema_version:SCHEMA_VERSION},{action:'AI-write'});patch.merchant_id=merchant.merchant_id;}
+  if(ai.merchant){let merchant=await repo.findOne('Merchants',x=>String(x.name||'').trim().toLowerCase()===String(ai.merchant).trim().toLowerCase());if(!merchant)merchant=await repo.insert('Merchants',{merchant_id:uuid(),name:String(ai.merchant).trim(),default_category_id:'',default_project_id:'',default_tags_json:'[]',icon:'',color:'',favorite:false,archived:false,is_deleted:false,deleted_at:'',created_at:nowIso(),updated_at:nowIso(),schema_version:SCHEMA_VERSION},{action:'AI-write'});patch.merchant_id=merchant.merchant_id;}
   const transaction=await finance.editTransaction(receipt.transaction_id,patch);await repo.updateById('Receipts',id,{ai_status:'applied'},{action:'AI-write'});const inbox=await repo.findOne('Inbox',x=>x.type==='receipt_ai'&&x.entity_id===id&&x.status==='pending');if(inbox)await repo.updateById('Inbox',inbox.inbox_id,{status:'done'});return transaction;
 }
 
@@ -251,8 +282,8 @@ async function saveSplit(repo,body){
 async function splitToReceivables(repo,finance,id,body){
   const split=await repo.getById('Splits',id);if(!split)throw new Error('NOT_FOUND');const items=await repo.list('SplitItems',{limit:1000,filter:x=>x.split_id===id}),calculation=calculateSplit({total_amount:split.total_amount,mode:split.mode,items:items.map(x=>({person_id:x.person_id,name:x.name,paid_amount:x.paid_amount,share_value:split.mode==='custom'?x.share_amount:x.share_value}))}),created=[];
   for(const settlement of calculation.settlements){
-    if(!settlement.to.person_id&&settlement.from.person_id)created.push(await finance.createReceivable({person_id:settlement.from.person_id,amount:settlement.amount,account_id:body.account_id,project_id:split.project_id,description:`دنگ ${split.title}`,date:body.date||new Date().toISOString().slice(0,10),source:'mini_app'}));
-    else if(!settlement.from.person_id&&settlement.to.person_id)created.push(await finance.createDebt({person_id:settlement.to.person_id,amount:settlement.amount,account_id:body.account_id||'',project_id:split.project_id,description:`دنگ ${split.title}`,date:body.date||new Date().toISOString().slice(0,10),source:'mini_app'}));
+    if(!settlement.to.person_id&&settlement.from.person_id)created.push(await finance.createReceivable({person_id:settlement.from.person_id,amount:settlement.amount,currency:'IRR',account_id:body.account_id,project_id:split.project_id,description:`دنگ ${split.title}`,date:body.date||new Date().toISOString().slice(0,10),source:'mini_app'}));
+    else if(!settlement.from.person_id&&settlement.to.person_id)created.push(await finance.createDebt({person_id:settlement.to.person_id,amount:settlement.amount,currency:'IRR',account_id:body.account_id||'',project_id:split.project_id,description:`دنگ ${split.title}`,date:body.date||new Date().toISOString().slice(0,10),source:'mini_app'}));
   }
   await repo.updateById('Splits',id,{status:'converted'});return{created};
 }

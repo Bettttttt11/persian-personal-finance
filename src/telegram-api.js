@@ -1,3 +1,9 @@
 export async function telegramCall(env,method,payload){if(!env.TELEGRAM_BOT_TOKEN)throw new Error('TELEGRAM_NOT_CONFIGURED');const r=await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/${method}`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(payload)});let j;try{j=await r.json()}catch{throw new Error('TELEGRAM_API_FAILED')}if(!r.ok||!j.ok){const e=new Error('TELEGRAM_API_FAILED');e.code=j?.error_code;e.description=j?.description;throw e;}return j.result;}
 export function webAppUrl(env,requestUrl){return (env.PUBLIC_BASE_URL||new URL(requestUrl).origin).replace(/\/$/,'')+'/app';}
 export async function downloadTelegramFile(env,fileId){const f=await telegramCall(env,'getFile',{file_id:fileId});if(!f?.file_path)throw new Error('TELEGRAM_API_FAILED');const r=await fetch(`https://api.telegram.org/file/bot${env.TELEGRAM_BOT_TOKEN}/${f.file_path}`);if(!r.ok)throw new Error('TELEGRAM_API_FAILED');return {bytes:await r.arrayBuffer(),path:f.file_path,mime:r.headers.get('content-type')||'application/octet-stream'};}
+
+export async function telegramSendDocument(env,chatId,bytes,{filename='finance-export.bin',mime='application/octet-stream',caption=''}={}){
+  if(!env.TELEGRAM_BOT_TOKEN)throw new Error('TELEGRAM_NOT_CONFIGURED');
+  const form=new FormData();form.append('chat_id',String(chatId));if(caption)form.append('caption',String(caption).slice(0,1000));form.append('document',new Blob([bytes],{type:mime}),filename);
+  const r=await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendDocument`,{method:'POST',body:form});let j;try{j=await r.json()}catch{throw new Error('TELEGRAM_API_FAILED')}if(!r.ok||!j.ok){const e=new Error('TELEGRAM_API_FAILED');e.code=j?.error_code;e.description=j?.description;throw e;}return j.result;
+}
