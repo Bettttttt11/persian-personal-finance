@@ -1,6 +1,6 @@
 import { GoogleSheetsClient } from './google.js';
 import { ID_FIELD } from './schema.js';
-import { SCHEMA_VERSION, nowIso, uuid, safeJsonParse } from './utils.js';
+import { SCHEMA_VERSION, nowIso, uuid, safeJsonParse, bool } from './utils.js';
 function q(name){return `'${String(name).replace(/'/g,"''")}'`;}
 function colName(n){ let s=''; for(n++;n>0;n=Math.floor((n-1)/26))s=String.fromCharCode(65+(n-1)%26)+s; return s; }
 function parseTableValues(vals=[]){ const headers=(vals[0]||[]).map(String),rows=[]; for(let i=1;i<vals.length;i++){ const obj={__row:i+1}; headers.forEach((h,c)=>obj[h]=vals[i]?.[c]??''); if(Object.values(obj).some((v,k)=>k!==0&&v!==''))rows.push(obj); } return{headers,rows}; }
@@ -13,7 +13,7 @@ export class Repository{
   async ensureHeaders(name,required){ const h=await this.headers(name,true); const missing=required.filter(x=>!h.includes(x)); if(!h.length){await this.g.valuesUpdate(`${q(name)}!A1`,[required]);} else if(missing.length){ const start=colName(h.length); await this.g.valuesUpdate(`${q(name)}!${start}1`,[missing]); } this.cache.delete(name);this.tableCache.delete(name);return [...h,...missing]; }
   async table(name,refresh=false){if(!refresh&&this.tableCache.has(name))return this.tableCache.get(name);const r=await this.g.valuesGet(`${q(name)}!A:ZZ`),out=parseTableValues(r.values||[]);this.cache.set(name,{headers:out.headers});this.tableCache.set(name,out);return out;}
   async prefetch(names=[]){ const pending=[...new Set(names)].filter(name=>name&&!this.tableCache.has(name)); if(!pending.length)return; const r=await this.g.valuesBatchGet(pending.map(name=>`${q(name)}!A:ZZ`)),ranges=r.valueRanges||[]; for(let i=0;i<pending.length;i++){const name=pending[i],out=parseTableValues(ranges[i]?.values||[]);this.cache.set(name,{headers:out.headers});this.tableCache.set(name,out);} }
-  async list(name,{limit=5000,offset=0,filter=null,includeDeleted=true,sort=null}={}){ let {rows}=await this.table(name); if(!includeDeleted)rows=rows.filter(r=>String(r.is_deleted)!=='true'); if(filter)rows=rows.filter(filter); if(sort)rows.sort(sort); return rows.slice(offset,offset+limit); }
+  async list(name,{limit=5000,offset=0,filter=null,includeDeleted=true,sort=null}={}){ let {rows}=await this.table(name); if(!includeDeleted)rows=rows.filter(r=>!bool(r.is_deleted)); if(filter)rows=rows.filter(filter); if(sort)rows.sort(sort); return rows.slice(offset,offset+limit); }
   async findOne(name,predicate){ const {rows}=await this.table(name); return rows.find(predicate)||null; }
   async getById(name,id){ const field=ID_FIELD[name]; if(!field)throw new Error('VALIDATION'); return this.findOne(name,r=>String(r[field])===String(id)); }
   async insert(name,data,{audit=true,action='create'}={}){

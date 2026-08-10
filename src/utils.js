@@ -17,7 +17,7 @@ export function parseMoney(v) {
   const n=Number(s); if(!Number.isSafeInteger(n)) throw new Error('INVALID_MONEY'); return n;
 }
 export function moneyFa(n=0) { return Number(n||0).toLocaleString('fa-IR')+' تومان'; }
-export function bool(v) { return v===true || v==='true' || v==='1' || v===1; }
+export function bool(v) { if(v===true || v===1)return true; const s=String(v??'').trim().toLowerCase(); return s==='true' || s==='1' || s==='yes' || s==='on'; }
 export function safeJsonParse(v, fallback=null) { try { return typeof v==='string' ? JSON.parse(v) : v ?? fallback; } catch { return fallback; } }
 export function json(v) { return JSON.stringify(v ?? null); }
 export function htmlEscape(s='') { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
