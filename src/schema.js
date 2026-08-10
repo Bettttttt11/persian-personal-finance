@@ -5,7 +5,7 @@ export const SHEETS={
  Categories:['category_id','name','icon','color','type','favorite','archived','created_at','updated_at','schema_version'],
  People:['person_id','name','phone','note','color','favorite','archived','created_at','updated_at','schema_version'],
  Projects:['project_id','name','description','icon','color','budget','start_date','end_date','status','favorite','archived','created_at','updated_at','schema_version'],
- Installments:['installment_id','title','total_amount','installment_count','default_installment_amount','start_date','due_day','person_id','account_id','project_id','status','note','created_at','updated_at','schema_version'],
+ Installments:['installment_id','title','total_amount','installment_count','default_installment_amount','start_date','due_day','due_dates_json','person_id','account_id','project_id','status','note','is_deleted','deleted_at','created_at','updated_at','schema_version'],
  InstallmentPayments:['payment_id','installment_id','transaction_id','amount','fee_amount','payment_date','note','created_at','schema_version'],
  Tags:['tag_id','name','color','favorite','archived','created_at','updated_at','schema_version'],
  Merchants:['merchant_id','name','default_category_id','default_project_id','default_tags_json','icon','color','favorite','archived','created_at','updated_at','schema_version'],

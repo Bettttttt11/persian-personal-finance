@@ -3,12 +3,12 @@ import { migrate } from './schema.js';
 import { activeBotSession, createBotAuth, revokeBotSessions } from './auth.js';
 import { FinanceService } from './business.js';
 import { currentMonthReport, personSummary, projectSummary, queryTransactions, summarize } from './reports.js';
-import { handleAiText, confirmAiActions, extractReceipt, getCapabilities, transcribeAudio, sanitizeAiText } from './ai.js';
+import { handleAiText, confirmAiActions, extractReceipt, getCapabilities, transcribeAudio, sanitizeAiText, aiErrorText } from './ai.js';
 import { telegramCall, webAppUrl, downloadTelegramFile } from './telegram-api.js';
 import { saveReceipt, saveInboxFile, getPrivate, putPrivate, deletePrivate, hasR2, probePrivateStorage, storageKind } from './storage.js';
 import { parseDateInput, formatJalali, tehranToday } from './jalali.js';
 import { advancePastDate } from './recurrence.js';
-import { moneyFa, nowIso, parseMoney, safeJsonParse, SCHEMA_VERSION, tgEscape, uuid, digitsEn, normalizeText } from './utils.js';
+import { moneyFa, nowIso, parseMoney, safeJsonParse, SCHEMA_VERSION, tgEscape, uuid, digitsEn, normalizeText, bool } from './utils.js';
 import { rowsFromCsv, previewImport } from './imports.js';
 
 const OWNER_ONLY='Access Denied';
@@ -181,7 +181,13 @@ async function handleText(msg,repo,env,url){
     if(state.action==='ai_choice'){const choice=state.options?.[Number(state.index)]||text;await repo.updateById('Drafts',input.draft.draft_id,{status:'done'},{audit:false});const result=await handleAiText(repo,env,`${state.original_text}\nانتخاب من: ${choice}`);return showAiResult(repo,env,chatId,state.message_id,result,url);}
   }
   const mode=await loadState(repo,'bot_mode');
-  if(mode?.state.mode==='ai'){await delIncoming(env,chatId,msg.message_id);const result=await handleAiText(repo,env,text);return showAiResult(repo,env,chatId,mode.state.message_id,result,url,text);}
+  if(mode?.state.mode==='ai'){
+    const history=Array.isArray(mode.state.history)?mode.state.history:[];let result;
+    try{result=await handleAiText(repo,env,text,history);}catch(error){await telegramCall(env,'sendMessage',{chat_id:chatId,text:`🤖 ${aiErrorText(error)}`});return;}
+    const assistant=result.kind==='actions'?`${result.actions.length} اقدام پیشنهادی برای تأیید آماده شد.`:result.kind==='split'?'محاسبه دنگ انجام شد.':String(result.text||'پاسخ آماده شد.');
+    mode.state.history=[...history,{role:'user',content:text},{role:'assistant',content:assistant}].slice(-12);await updateDraft(repo,mode.draft,mode.state);
+    return showAiResult(repo,env,chatId,null,result,url,text);
+  }
   if(await quickEntry(repo,env,chatId,text,url)){await delIncoming(env,chatId,msg.message_id);return;}
   await telegramCall(env,'sendMessage',{chat_id:chatId,text:'از منو استفاده کنید یا یک ثبت سریع مثل «ناهار 150000» بفرستید.',reply_markup:mainKeyboard(env,url)});
 }
@@ -199,7 +205,7 @@ async function handleCallback(cb,repo,env,url){
   if(data.startsWith('proj:')){const id=data.slice(5),p=await repo.getById('Projects',id),s=await projectSummary(repo,id);return panel(env,chatId,mid,`📁 <b>${tgEscape(p.name)}</b>\nخرج خالص: ${moneyFa(s.net_expense)}\nدرآمد: ${moneyFa(s.income)}\nکارمزد: ${moneyFa(s.fees)}\nفیش‌ها: ${s.receipt_count.toLocaleString('fa-IR')}${s.budget.amount?`\nبودجه: ${moneyFa(s.budget.used)} / ${moneyFa(s.budget.amount)}`:''}`,kb([[web('باز کردن پروژه',webAppUrl(env,url))],[btn('⬅️ پروژه‌ها','m:projects')]]));}
   if(data==='m:people'){const rows=await namedRows(repo,'People');return panel(env,chatId,mid,'👥 <b>اشخاص</b>',kb([...rows.slice(0,10).map(p=>[btn(p.name,`person:${p.person_id}`)]),[web('مدیریت اشخاص',webAppUrl(env,url))],[btn('⬅️ منو','m:home')]]));}
   if(data.startsWith('person:')){const id=data.slice(7),p=await repo.getById('People',id),s=await personSummary(repo,id),open=(s.debts||[]).filter(x=>x.status!=='settled').slice(0,4);return panel(env,chatId,mid,`👤 <b>${tgEscape(p.name)}</b>\nخرج برای شخص: ${moneyFa(s.spent)}\nدریافت از شخص: ${moneyFa(s.received)}\nطلب: ${moneyFa(s.receivable)}\nبدهی: ${moneyFa(s.debt)}\nمانده: <b>${moneyFa(s.balance)}</b>`,kb([...open.map(d=>[btn(`${d.kind==='receivable'?'طلب':'بدهی'} — ${moneyFa(Number(d.principal_amount)-Number(d.settled_amount||0))}`,`debt:view:${d.debt_id}`)]),[web('جزئیات کامل',webAppUrl(env,url))],[btn('⬅️ اشخاص','m:people')]]));}
-  if(data==='m:installments'){const rows=await repo.list('Installments',{limit:500,filter:x=>x.status!=='completed'&&String(x.archived)!=='true'});return panel(env,chatId,mid,'💳 <b>اقساط</b>',kb([...rows.slice(0,10).map(p=>[btn(p.title,`inst:view:${p.installment_id}`)]),[web('مدیریت اقساط',webAppUrl(env,url))],[btn('⬅️ منو','m:home')]]));}
+  if(data==='m:installments'){const rows=await repo.list('Installments',{limit:500,filter:x=>x.status!=='completed'&&!bool(x.is_deleted)});return panel(env,chatId,mid,'💳 <b>اقساط</b>',kb([...rows.slice(0,10).map(p=>[btn(p.title,`inst:view:${p.installment_id}`)]),[web('مدیریت اقساط',webAppUrl(env,url))],[btn('⬅️ منو','m:home')]]));}
   if(data.startsWith('inst:view:')){const id=data.slice(10),s=await finance.installmentSummary(id);return panel(env,chatId,mid,`💳 <b>${tgEscape(s.plan.title)}</b>\nپرداخت شده: ${moneyFa(s.paid)}\nباقی‌مانده: ${moneyFa(s.remaining)}\nکارمزدها: ${moneyFa(s.fees)}\nتعداد پرداخت: ${s.payment_count.toLocaleString('fa-IR')}`,kb([[btn('➕ ثبت پرداخت',`inst:pay:${id}`),web('جزئیات',webAppUrl(env,url))],[btn('⬅️ اقساط','m:installments')]]));}
   if(data.startsWith('inst:pay:'))return startInstallmentPayment(repo,env,chatId,mid,url,data.slice(9));
   if(data.startsWith('debt:view:')){const id=data.slice(10),d=await repo.getById('Debts',id);if(!d)return;const remaining=Math.max(0,Number(d.principal_amount)-Number(d.settled_amount||0));return panel(env,chatId,mid,`👥 <b>${d.kind==='receivable'?'طلب':'بدهی'}</b>\nمانده: ${moneyFa(remaining)}\nوضعیت: ${tgEscape(d.status)}`,kb([[btn('💵 تسویه کامل',`debt:full:${id}`),btn('➗ تسویه جزئی',`debt:part:${id}`)],[web('جزئیات',webAppUrl(env,url))],[btn('⬅️ اشخاص','m:people')]]));}

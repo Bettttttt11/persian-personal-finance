@@ -1,4 +1,4 @@
-export const SCHEMA_VERSION = 5;
+export const SCHEMA_VERSION = 6;
 export const DEFAULT_CURRENCY = 'TOMAN';
 export const SESSION_TIMEOUTS = { '15m': 900, '30m': 1800, '1h': 3600, manual: null };
 

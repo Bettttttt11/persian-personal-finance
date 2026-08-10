@@ -14,10 +14,10 @@ export async function getCapabilities(repo,env){
   if(!env.OPENROUTER_API_KEY)return(repo._aiCapabilities=out);
   const ids={};for(const kind of Object.keys(MODEL_KEYS))ids[kind]=await modelId(repo,env,kind);
   let data=[];
-  try{const response=await fetch(`${OR}/models?output_modalities=all`,{headers:{authorization:`Bearer ${env.OPENROUTER_API_KEY}`}});const body=await response.json();if(!response.ok)throw new Error('AI_FAILED');data=body.data||[];}catch{return(repo._aiCapabilities=out);}
+  try{const response=await fetch(`${OR}/models`,{headers:{authorization:`Bearer ${env.OPENROUTER_API_KEY}`}});const body=await response.json();if(!response.ok)throw new Error('AI_FAILED');data=body.data||[];}catch{return(repo._aiCapabilities=out);}
   for(const [kind,id] of Object.entries(ids)){
     if(!id)continue;const model=data.find(x=>x.id===id);
-    if(!model){out.models[kind]={id,known:false,structured:false};continue;}
+    if(!model){out.models[kind]={id,known:false,structured:false,supported_parameters:[]};if(kind==='text')out.text=true;continue;}
     const input=model.architecture?.input_modalities||[],output=model.architecture?.output_modalities||[],parameters=model.supported_parameters||[];
     out.models[kind]={id,known:true,input_modalities:input,output_modalities:output,supported_parameters:parameters,structured:parameters.includes('structured_outputs')};
     if(kind==='text')out.text=input.includes('text');
@@ -31,13 +31,16 @@ export async function getCapabilities(repo,env){
   return(repo._aiCapabilities=out);
 }
 
-async function chat(repo,env,{model,messages,jsonSchema=null,maxTokens=700}){
+async function chat(repo,env,{model,messages,jsonSchema=null,maxTokens=700,temperature=0.2}){
   if(!env.OPENROUTER_API_KEY||!model)throw new Error('AI_DISABLED');
-  const caps=await getCapabilities(repo,env),cap=Object.values(caps.models).find(x=>x?.id===model),body={model,messages,max_completion_tokens:maxTokens,temperature:0.1};
-  if(jsonSchema&&cap?.structured)body.response_format={type:'json_schema',json_schema:{name:'finance_response',strict:true,schema:jsonSchema}};
+  const caps=await getCapabilities(repo,env),cap=Object.values(caps.models).find(x=>x?.id===model),body={model,messages,max_tokens:maxTokens,temperature};
+  if(jsonSchema){
+    if(cap?.structured){body.response_format={type:'json_schema',json_schema:{name:'finance_response',strict:true,schema:jsonSchema}};body.provider={require_parameters:true};body.plugins=[{id:'response-healing'}];}
+    else if(cap?.supported_parameters?.includes('response_format')){body.response_format={type:'json_object'};body.plugins=[{id:'response-healing'}];}
+  }
   const response=await fetch(`${OR}/chat/completions`,{method:'POST',headers:{authorization:`Bearer ${env.OPENROUTER_API_KEY}`,'content-type':'application/json','HTTP-Referer':env.PUBLIC_BASE_URL||'https://finance.local','X-Title':'Personal Finance Telegram'},body:JSON.stringify(body)});
   let result={};try{result=await response.json();}catch{}
-  if(!response.ok||!result.choices?.[0]?.message)throw new Error('AI_FAILED');
+  if(!response.ok||!result.choices?.[0]?.message){const e=new Error('AI_FAILED');e.status=response.status;e.detail=String(result?.error?.message||'').slice(0,180);throw e;}
   const content=result.choices[0].message.content;if(typeof content==='string')return content;
   if(Array.isArray(content))return content.map(x=>x?.text||'').join('\n');
   throw new Error('AI_FAILED');
@@ -64,15 +67,17 @@ async function resolveNamed(repo,sheet,name){
 }
 async function compactEntityContext(repo){
   const defs=[['Accounts','account_id','accounts'],['Categories','category_id','categories'],['People','person_id','people'],['Projects','project_id','projects'],['Merchants','merchant_id','merchants'],['Installments','installment_id','installments']];const out={};
-  for(const [sheet,id,key] of defs){let rows=await repo.list(sheet,{limit:100,filter:x=>String(x.archived)!=='true'});if(sheet==='Installments')rows=rows.filter(x=>x.status!=='completed');out[key]=rows.slice(0,60).map(x=>({id:x[id],name:x.name||x.title||'',status:x.status||undefined}));}
-  return out;
+  const results=await Promise.all(defs.map(async([sheet,id,key])=>{let rows=await repo.list(sheet,{limit:100,filter:x=>String(x.archived)!=='true'&&String(x.is_deleted).toLowerCase()!=='true'});if(sheet==='Installments')rows=rows.filter(x=>x.status!=='completed');return[key,rows.slice(0,60).map(x=>({id:x[id],name:x.name||x.title||'',status:x.status||undefined}))]}));
+  for(const [key,rows] of results)out[key]=rows;out.defaults={account_id:await repo.setting('default_account',''),today:parseDateInput('امروز')};return out;
 }
-export async function planUserText(repo,env,text){
-  const model=await modelId(repo,env,'text');if(!model)throw new Error('AI_DISABLED');const context=await compactEntityContext(repo);
-  const prompt=`شما Planner مالی شخصی هستید. فقط JSON معتبر بده و هیچ write اجرا نکن.\nقواعد:\n- مبلغ تومان فقط عدد صحیح.\n- برای سؤال اطلاعاتی kind=read. برای ثبت یا ویرایش kind=actions. برای دنگ kind=split.\n- اگر کاربر شخص، قسط، حساب یا پروژه‌ای را نام برد که در context چند تطابق دارد، kind=clarify بده؛ حدس نزن.\n- برای شناسه‌ها فقط IDهای context را استفاده کن. اگر مورد جدید خواسته شد create_person/create_project مجاز است.\n- create_transaction type یکی از expense,income,transfer,installment_payment,debt,receivable,refund,adjustment.\n- هیچ delete یا bulk write پیشنهاد نده.\nmetricهای read: summary, top_expense, search, person, merchant.\nactionهای مجاز: create_transaction, edit_transaction, create_person, create_project, pay_installment, settle_debt.\ncontext: ${JSON.stringify(context)}\nمتن کاربر: ${text}`;
-  const raw=await chat(repo,env,{model,messages:[{role:'system',content:'خروجی فقط JSON مطابق schema است.'},{role:'user',content:prompt}],jsonSchema:plannerSchema,maxTokens:1100});return validatePlan(extractJson(raw));
+export async function planUserText(repo,env,text,history=[]){
+  const model=await modelId(repo,env,'text');if(!model)throw new Error('AI_DISABLED');const context=await compactEntityContext(repo),recent=(Array.isArray(history)?history:[]).slice(-10).map(x=>({role:x.role==='assistant'?'assistant':'user',content:String(x.content||'').slice(0,1000)}));
+  const prompt=`تو دستیار مالی شخصی فارسی و صمیمی هستی. اول نیت کاربر را بفهم و فقط JSON معتبر مطابق schema برگردان.\nقواعد:\n- برای سلام، گپ، توضیح یا سؤال غیرعملیاتی kind=chat و reply کوتاه و طبیعی بده.\n- برای سؤال درباره داده‌های مالی kind=read.\n- اگر کاربر می‌خواهد چیزی ثبت/ویرایش/پرداخت کند و اطلاعات کافی هست kind=actions. قبل از هر write فقط پیشنهاد بده؛ اجرا بعد از تأیید کاربر است.\n- اگر برای اقدام اطلاعات واقعاً لازم کم است kind=clarify و فقط همان سؤال ضروری را بپرس. حدس نزن.\n- اگر تاریخ تراکنش گفته نشده، امروز (${context.defaults.today}) را استفاده کن.\n- اگر حساب گفته نشده و default account در context وجود دارد از همان ID استفاده کن؛ اگر وجود ندارد و چند حساب هست سؤال کن کدام حساب.\n- مبلغ تومان فقط عدد صحیح. اعداد فارسی را مفهوم کن.\n- برای شناسه‌ها فقط IDهای context را استفاده کن.\n- create_transaction type یکی از expense,income,transfer,installment_payment,debt,receivable,refund,adjustment.\n- هیچ delete یا bulk write پیشنهاد نده.\n- برای عبارت‌های طبیعی مثل «ناهار ۳۵۰ دادم» خودت بفهم که احتمالاً ثبت خرج است. اگر اطلاعات کافی بود پیشنهاد ثبت بساز.\n- اگر کاربر درباره حرف قبلی‌اش ادامه می‌دهد، از تاریخچه مکالمه استفاده کن.\nmetricهای read: summary, top_expense, search, person, merchant.\nactionهای مجاز: create_transaction, edit_transaction, create_person, create_project, pay_installment, settle_debt.\ncontext: ${JSON.stringify(context)}\nمتن جدید کاربر: ${text}`;
+  const messages=[{role:'system',content:'فقط JSON معتبر مطابق schema بده. برای مکالمه عادی kind=chat و reply بنویس.'},...recent,{role:'user',content:prompt}];
+  let raw;try{raw=await chat(repo,env,{model,messages,jsonSchema:plannerSchema,maxTokens:1200,temperature:0.15});return validatePlan(extractJson(raw));}catch(first){
+    try{raw=await chat(repo,env,{model,messages:[{role:'system',content:'فقط یک شیء JSON معتبر بده؛ بدون Markdown و بدون توضیح بیرون JSON.'},...recent,{role:'user',content:prompt}],maxTokens:1200,temperature:0});return validatePlan(extractJson(raw));}catch{throw first;}
+  }
 }
-
 async function executeRead(repo,plan){
   const r=plan.read||{};let from=r.from,to=r.to;try{if(from)from=parseDateInput(from);if(to)to=parseDateInput(to);}catch{}
   if(r.metric==='person'){const person=await resolveNamed(repo,'People',r.person_name);if(person.ambiguous)return{clarify:'کدام شخص؟',options:person.options,entity:'person'};if(!person.id)return{data:{found:false,person:r.person_name}};return{data:await personSummary(repo,person.id),label:person.row.name};}
@@ -88,21 +93,25 @@ function deterministicReadText(result){
   if(d?.receivable!==undefined)return`طلب باز: ${Number(d.receivable).toLocaleString('fa-IR')}، بدهی باز: ${Number(d.debt).toLocaleString('fa-IR')} تومان.`;
   if(d?.count!==undefined)return`${d.count.toLocaleString('fa-IR')} مورد پیدا شد.`;return'اطلاعات پیدا شد.';
 }
-export async function handleAiText(repo,env,text){
-  const plan=await planUserText(repo,env,text);
+async function friendlyChat(repo,env,text,history=[]){
+  const model=await modelId(repo,env,'text');if(!model)throw new Error('AI_DISABLED');const recent=(Array.isArray(history)?history:[]).slice(-10).map(x=>({role:x.role==='assistant'?'assistant':'user',content:String(x.content||'').slice(0,1200)}));
+  return sanitizeAiText(await chat(repo,env,{model,messages:[{role:'system',content:'فارسی، صمیمی، کوتاه و کاربردی جواب بده. تو دستیار مالی شخصی هستی. اگر کاربر قصد ثبت مالی دارد ولی اطلاعات لازم کم است، یک سؤال روشن بپرس. هیچ ثبت یا حذف را خودت انجام نده.'},...recent,{role:'user',content:text}],maxTokens:450,temperature:0.45}));
+}
+export async function handleAiText(repo,env,text,history=[]){
+  let plan;try{plan=await planUserText(repo,env,text,history);}catch(error){try{return{kind:'chat',text:await friendlyChat(repo,env,text,history),fallback:true};}catch{throw error;}}
   if(plan.kind==='read'){
     const result=await executeRead(repo,plan);if(result.clarify)return{kind:'clarify',text:result.clarify,options:result.options,entity:result.entity||''};const base=deterministicReadText(result),model=await modelId(repo,env,'text');let friendly=base;
-    try{const minimal=JSON.stringify(result.data,(key,value)=>key==='transactions'&&Array.isArray(value)?value.slice(0,12):value);friendly=await chat(repo,env,{model,messages:[{role:'system',content:'پاسخ فارسی کوتاه و بدون Markdown بده. اعداد داده‌شده را تغییر نده.'},{role:'user',content:`سؤال: ${text}\nنتیجه محاسبه قطعی کد: ${minimal}\nیک پاسخ کوتاه بنویس.`}],maxTokens:250});}catch{}
+    try{const minimal=JSON.stringify(result.data,(key,value)=>key==='transactions'&&Array.isArray(value)?value.slice(0,12):value);friendly=await chat(repo,env,{model,messages:[{role:'system',content:'پاسخ فارسی کوتاه، صمیمی و بدون Markdown بده. اعداد داده‌شده را تغییر نده.'},...(Array.isArray(history)?history:[]).slice(-6),{role:'user',content:`سؤال: ${text}\nنتیجه محاسبه قطعی کد: ${minimal}\nپاسخ طبیعی بده.`}],maxTokens:300,temperature:0.35});}catch{}
     return{kind:'read',text:sanitizeAiText(friendly),data:result.data};
   }
-  if(plan.kind==='split'){try{return{kind:'split',result:calculateSplit(plan.split)}}catch{return{kind:'clarify',text:'اطلاعات دنگ کامل نیست؛ مبلغ کل، افراد و پرداختی هر نفر را مشخص کنید.'}}}
+  if(plan.kind==='split'){try{return{kind:'split',result:calculateSplit(plan.split)}}catch{return{kind:'clarify',text:'اطلاعات دنگ کامل نیست؛ مبلغ کل، افراد و پرداختی هر نفر را بگو.'}}}
   if(plan.kind==='actions'){
     const proposal=await repo.insert('Drafts',{draft_id:uuid(),kind:'ai_actions',owner_telegram_id:String(env.OWNER_TELEGRAM_ID),state_json:json({text,actions:plan.actions}),status:'active',created_at:nowIso(),updated_at:nowIso(),expires_at:new Date(Date.now()+24*3600e3).toISOString(),schema_version:SCHEMA_VERSION});
-    return{kind:'actions',draft_id:proposal.draft_id,actions:plan.actions};
+    return{kind:'actions',draft_id:proposal.draft_id,actions:plan.actions,text:plan.reply||''};
   }
-  return{kind:plan.kind,text:sanitizeAiText(plan.reply||plan.question||'لطفاً جزئیات بیشتری بگویید.'),options:plan.options||[]};
+  if(plan.kind==='chat'&&!plan.reply)plan.reply=await friendlyChat(repo,env,text,history);
+  return{kind:plan.kind,text:sanitizeAiText(plan.reply||plan.question||'یکم بیشتر توضیح می‌دی؟'),options:plan.options||[]};
 }
-
 function requirePositiveInt(value){return Number.isSafeInteger(Number(value))&&Number(value)>0;}
 export async function confirmAiActions(repo,finance,draftId){
   const draft=await repo.getById('Drafts',draftId);if(!draft||draft.kind!=='ai_actions'||draft.status!=='active')throw new Error('NOT_FOUND');const state=safeJsonParse(draft.state_json,{}),results=[];
@@ -128,6 +137,7 @@ export async function confirmAiActions(repo,finance,draftId){
   await repo.updateById('Drafts',draftId,{status:'confirmed'},{action:'ai_confirm'});await repo.audit('Drafts',draftId,'AI-write',draft,{...draft,status:'confirmed'});return results;
 }
 export function sanitizeAiText(value=''){return String(value).replace(/```[\s\S]*?```/g,'').replace(/\*\*|__|###?|`/g,'').replace(/\n{3,}/g,'\n\n').trim().slice(0,3500);}
+export function aiErrorText(error){const m=String(error?.message||'');if(m==='AI_DISABLED')return'مدل متنی OpenRouter تنظیم نشده است.';if(m==='AI_INVALID_JSON')return'مدل پاسخ ساختاری نامعتبر داد؛ دوباره با جمله ساده‌تر امتحان کن.';if(m==='AI_FAILED')return'OpenRouter پاسخ قابل استفاده نداد. نام مدل و اعتبار API Key را در تنظیمات بررسی کن.';return'دستیار فعلاً نتوانست پاسخ بدهد. دوباره امتحان کن.';}
 function bytesToB64(bytes){let s='';const u=new Uint8Array(bytes);for(let i=0;i<u.length;i+=0x8000)s+=String.fromCharCode(...u.subarray(i,i+0x8000));return btoa(s);}
 
 export async function extractReceipt(repo,env,bytes,mime='image/webp'){

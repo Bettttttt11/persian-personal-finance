@@ -9,7 +9,7 @@ import { undoLast } from './audit.js';
 import { getCapabilities, handleAiText, confirmAiActions, extractReceipt, analyzePdf } from './ai.js';
 import { saveReceipt, replaceWithWebp, getPrivate, putPrivate, deleteReceipt, saveInboxFile, storageStats, hasR2, probePrivateStorage, storageKind } from './storage.js';
 import { telegramCall } from './telegram-api.js';
-import { SCHEMA_VERSION, bad, clearCookie as clearCookieUtil, corsHeaders, nowIso, ok, safeJsonParse, securityHeaders, toCsv, userError, uuid } from './utils.js';
+import { SCHEMA_VERSION, bad, bool, clearCookie as clearCookieUtil, corsHeaders, nowIso, ok, safeJsonParse, securityHeaders, toCsv, userError, uuid } from './utils.js';
 import { parseDateInput } from './jalali.js';
 
 const ENTITY_ALLOWED=new Set(Object.keys(ENTITY_MAP));
@@ -90,6 +90,8 @@ export async function handleApi(request,env){
     else if(/^\/api\/projects\/[^/]+\/summary$/.test(path)&&request.method==='GET')result=await projectSummary(repo,path.split('/')[3]);
     else if(/^\/api\/installments\/[^/]+\/summary$/.test(path)&&request.method==='GET')result=await finance.installmentSummary(path.split('/')[3]);
     else if(/^\/api\/installments\/[^/]+\/pay$/.test(path)&&request.method==='POST')result=await finance.payInstallment(path.split('/')[3],{...(await bodyJson(request)),source:'mini_app'});
+    else if(/^\/api\/installments\/[^/]+\/restore$/.test(path)&&request.method==='POST')result=await finance.restoreInstallment(path.split('/')[3]);
+    else if(/^\/api\/installments\/[^/]+$/.test(path)&&request.method==='DELETE')result=await finance.softDeleteInstallment(path.split('/')[3]);
     else if(/^\/api\/debts\/[^/]+\/settle$/.test(path)&&request.method==='POST')result=await finance.settleDebt(path.split('/')[3],{...(await bodyJson(request)),source:'mini_app'});
 
     else if(path==='/api/undo'&&request.method==='POST')result=await undoLast(repo,finance);
@@ -146,7 +148,7 @@ export async function handleApi(request,env){
     else if(/^\/api\/imports\/[^/]+\/confirm$/.test(path)&&request.method==='POST')result=await confirmImport(repo,finance,path.split('/')[3],(await bodyJson(request)).decisions||{});
 
     else if(path==='/api/ai/capabilities'&&request.method==='GET')result=await getCapabilities(repo,env);
-    else if(path==='/api/ai/ask'&&request.method==='POST')result=await handleAiText(repo,env,(await bodyJson(request)).text||'');
+    else if(path==='/api/ai/ask'&&request.method==='POST'){const body=await bodyJson(request);result=await handleAiText(repo,env,body.text||'',Array.isArray(body.history)?body.history:[]);}
     else if(/^\/api\/ai\/confirm\/[^/]+$/.test(path)&&request.method==='POST')result={items:await confirmAiActions(repo,finance,path.split('/')[4])};
     else if(/^\/api\/ai\/cancel\/[^/]+$/.test(path)&&request.method==='POST')result=await repo.updateById('Drafts',path.split('/')[4],{status:'discarded'},{action:'ai_cancel'});
     else if(path==='/api/ai/pdf'&&request.method==='POST'){
@@ -158,7 +160,7 @@ export async function handleApi(request,env){
     else if(/^\/api\/splits\/[^/]+\/receivables$/.test(path)&&request.method==='POST')result=await splitToReceivables(repo,finance,path.split('/')[3],await bodyJson(request));
 
     else if(path==='/api/trash'&&request.method==='GET'){
-      const rows=await repo.list('Transactions',{limit:10000,filter:x=>String(x.is_deleted)==='true',sort:(a,b)=>String(b.deleted_at).localeCompare(String(a.deleted_at))});result={items:rows.map(cleanForClient)};
+      const rows=await repo.list('Transactions',{limit:10000,filter:x=>bool(x.is_deleted),sort:(a,b)=>String(b.deleted_at).localeCompare(String(a.deleted_at))});result={items:rows.map(cleanForClient)};
     }else if(/^\/api\/merge\/[^/]+$/.test(path)&&request.method==='POST'){
       const name=path.split('/')[3],sheet=ENTITY_MAP[name];if(!sheet)throw new Error('VALIDATION');const body=await bodyJson(request);if(body.confirm!=='MERGE')throw new Error('VALIDATION');result=await finance.merge(sheet,body.primary_id,body.duplicate_id);
     }else{
@@ -191,18 +193,19 @@ function validateEntityInput(sheet,row){
   for(const key of moneyFields)if(row[key]!==undefined&&row[key]!==''){const n=Number(row[key]);if(!Number.isSafeInteger(n)||n<0)throw new Error('INVALID_MONEY');row[key]=n;}
   const positiveInts={Installments:['installment_count','due_day'],Rules:['priority']}[sheet]||[];for(const key of positiveInts)if(row[key]!==undefined&&row[key]!==''){const n=Number(row[key]);if(!Number.isInteger(n)||(key==='priority'?n<0:n<=0)||(key==='due_day'&&n>31))throw new Error('VALIDATION');row[key]=n;}
   const dateFields={Projects:['start_date','end_date'],Installments:['start_date'],Recurring:['next_due_date'],Debts:['due_date']}[sheet]||[];for(const key of dateFields)if(row[key])row[key]=parseDateInput(row[key]);
+  if(sheet==='Installments'&&row.due_dates_json!==undefined&&row.due_dates_json!==''){let dates;try{dates=typeof row.due_dates_json==='string'?JSON.parse(row.due_dates_json):row.due_dates_json}catch{throw new Error('VALIDATION')}if(!Array.isArray(dates)||dates.some(x=>!String(x||'').trim()))throw new Error('VALIDATION');dates=dates.map(parseDateInput);if(row.installment_count!==undefined&&Number(row.installment_count)!==dates.length)throw new Error('VALIDATION');row.due_dates_json=JSON.stringify(dates);}
   const enums={Accounts:{type:['Bank account','Card','Cash','Wallet','Other']},Categories:{type:['expense','income','both']},Projects:{status:['active','completed','archived']},Installments:{status:['active','completed','overdue']},Recurring:{type:['expense','income'],frequency:['daily','weekly','monthly','yearly','custom']},Budgets:{scope_type:['global','category','project']},Templates:{type:['expense','income','transfer']}}[sheet]||{};for(const [key,values] of Object.entries(enums))if(row[key]!==undefined&&row[key]!==''&&!values.includes(String(row[key])))throw new Error('VALIDATION');
   const jsonFields={Merchants:['default_tags_json'],Rules:['conditions_json','actions_json'],Templates:['tags_json'],Recurring:['custom_json'],Budgets:['warning_thresholds_json']}[sheet]||[];for(const key of jsonFields)if(row[key]!==undefined&&row[key]!==''){let parsed;try{parsed=typeof row[key]==='string'?JSON.parse(row[key]):row[key]}catch{throw new Error('VALIDATION')}if(['default_tags_json','tags_json','warning_thresholds_json'].includes(key)&&!Array.isArray(parsed))throw new Error('VALIDATION');if(['conditions_json','actions_json','custom_json'].includes(key)&&(parsed===null||Array.isArray(parsed)||typeof parsed!=='object'))throw new Error('VALIDATION');row[key]=JSON.stringify(parsed);}
   if(sheet==='Installments'&&row.total_amount!==undefined&&row.default_installment_amount!==undefined&&Number(row.default_installment_amount)>Number(row.total_amount))throw new Error('VALIDATION');return row;
 }
 function entityDefaults(sheet,row){
   if(['Accounts','Categories','People','Projects','Tags','Merchants','Templates'].includes(sheet)){if(row.archived===undefined)row.archived=false;if(row.favorite===undefined&&['Accounts','Categories','People','Projects','Tags','Merchants','Templates'].includes(sheet))row.favorite=false;}
-  if(sheet==='Projects'&&!row.status)row.status='active';if(sheet==='Rules'&&row.enabled===undefined)row.enabled=true;if(sheet==='Recurring'&&row.enabled===undefined)row.enabled=true;if(sheet==='Budgets'&&row.active===undefined)row.active=true;return row;
+  if(sheet==='Projects'&&!row.status)row.status='active';if(sheet==='Installments'){if(!row.status)row.status='active';if(row.is_deleted===undefined)row.is_deleted=false;}if(sheet==='Rules'&&row.enabled===undefined)row.enabled=true;if(sheet==='Recurring'&&row.enabled===undefined)row.enabled=true;if(sheet==='Budgets'&&row.active===undefined)row.active=true;return row;
 }
 async function genericEntity(path,request,repo,url){
   const match=path.match(/^\/api\/entities\/([^/]+)(?:\/([^/]+))?(?:\/(archive|restore))?$/);if(!match||!ENTITY_ALLOWED.has(match[1]))return{handled:false};
   const sheet=ENTITY_MAP[match[1]],id=match[2],action=match[3],idField=ID_FIELD[sheet];
-  if(request.method==='GET'&&!id){const page=paginate(url),rows=await repo.list(sheet,{limit:5000,filter:x=>url.searchParams.get('archived')==='all'||String(x.archived)!=='true',sort:(a,b)=>Number(String(b.favorite)==='true')-Number(String(a.favorite)==='true')||String(a.name||a.title||'').localeCompare(String(b.name||b.title||''),'fa')});return{handled:true,result:{items:rows.slice(page.offset,page.offset+page.limit).map(cleanForClient),total:rows.length}};}
+  if(request.method==='GET'&&!id){const page=paginate(url),rows=await repo.list(sheet,{limit:5000,filter:x=>(sheet!=='Installments'||!bool(x.is_deleted))&&(url.searchParams.get('archived')==='all'||String(x.archived)!=='true'),sort:(a,b)=>Number(String(b.favorite)==='true')-Number(String(a.favorite)==='true')||String(a.name||a.title||'').localeCompare(String(b.name||b.title||''),'fa')});return{handled:true,result:{items:rows.slice(page.offset,page.offset+page.limit).map(cleanForClient),total:rows.length}};}
   if(request.method==='GET'&&id)return{handled:true,result:cleanForClient(await repo.getById(sheet,id))};
   if(request.method==='POST'&&!id){const body=await bodyJson(request),headers=await repo.headers(sheet),row={};for(const header of headers)if(body[header]!==undefined&&!['__row','created_at','updated_at','schema_version'].includes(header))row[header]=body[header];if(!row[idField])row[idField]=uuid();entityDefaults(sheet,row);validateEntityInput(sheet,row);row.created_at=nowIso();row.updated_at=nowIso();row.schema_version=SCHEMA_VERSION;return{handled:true,result:await repo.insert(sheet,row)};}
   if(request.method==='PATCH'&&id&&!action){const body=await bodyJson(request),headers=await repo.headers(sheet),patch={};for(const header of headers)if(body[header]!==undefined&&!['__row',idField,'created_at','schema_version'].includes(header))patch[header]=body[header];validateEntityInput(sheet,patch);return{handled:true,result:await repo.updateById(sheet,id,patch)};}

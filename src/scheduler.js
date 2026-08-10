@@ -1,6 +1,7 @@
-import { nowIso, uuid, SCHEMA_VERSION, moneyFa } from './utils.js';
+import { nowIso, uuid, SCHEMA_VERSION, moneyFa, bool } from './utils.js';
 import { telegramCall, webAppUrl } from './telegram-api.js';
 import { budgetProgress, queryTransactions } from './reports.js';
+import { FinanceService } from './business.js';
 import { jalaliMonthRange, jalaliToGregorian, tehranToday } from './jalali.js';
 
 async function once(repo,type,entityId,periodKey,fn){
@@ -19,8 +20,8 @@ export async function runDaily(repo,env,requestUrl='https://worker.invalid'){
     for(const item of recurring)if(await once(repo,'recurring',item.recurring_id,item.next_due_date,()=>telegramCall(env,'sendMessage',{chat_id:owner,text:`🔁 ${item.title}\n${moneyFa(item.amount)}\nموعد: ${item.next_due_date}`,reply_markup:{inline_keyboard:[[{text:'✅ ثبت',callback_data:`rec:post:${item.recurring_id}`},{text:'رد',callback_data:`rec:skip:${item.recurring_id}`}],...(dashboardRow(env,requestUrl,'✏️ ویرایش')?[dashboardRow(env,requestUrl,'✏️ ویرایش')]:[])]}})))sent.push(`recurring:${item.recurring_id}`);
   }
   if(prefs?.installments!==false){
-    const [plans,payments]=await Promise.all([repo.list('Installments',{limit:1000,filter:x=>x.status!=='completed'&&String(x.archived)!=='true'}),repo.list('InstallmentPayments',{limit:10000})]);
-    for(const plan of plans){const due=dueDateForJalaliMonth(period,plan.due_day),alreadyPaid=payments.some(p=>p.installment_id===plan.installment_id&&p.payment_date>=period.start&&p.payment_date<=period.end);if(!alreadyPaid&&today>due&&plan.status!=='overdue')await repo.updateById('Installments',plan.installment_id,{status:'overdue'},{audit:false});if(!alreadyPaid&&today>=due&&await once(repo,'installment',plan.installment_id,periodKey,()=>telegramCall(env,'sendMessage',{chat_id:owner,text:`💳 یادآوری قسط\n${plan.title}\nمبلغ پیش‌فرض: ${moneyFa(plan.default_installment_amount)}\nسررسید: ${due}`,reply_markup:{inline_keyboard:[[{text:'ثبت پرداخت',callback_data:`inst:pay:${plan.installment_id}`},{text:'جزئیات',callback_data:`inst:view:${plan.installment_id}`}]]}})))sent.push(`installment:${plan.installment_id}`);}
+    const plans=await repo.list('Installments',{limit:1000,filter:x=>x.status!=='completed'&&!bool(x.is_deleted)}),finance=new FinanceService(repo,'scheduler');
+    for(const plan of plans){let summary;try{summary=await finance.installmentSummary(plan.installment_id)}catch{continue}const next=summary.schedule?.find(x=>x.status!=='paid');if(!next?.due_date)continue;const due=next.due_date,key=`${next.number}:${due}`;if(next.status==='overdue'&&plan.status!=='overdue')await repo.updateById('Installments',plan.installment_id,{status:'overdue'},{audit:false});if(today>=due&&await once(repo,'installment',plan.installment_id,key,()=>telegramCall(env,'sendMessage',{chat_id:owner,text:`💳 یادآوری قسط ${next.number}\n${plan.title}\nمبلغ باقیمانده این قسط: ${moneyFa(next.remaining_amount)}\nسررسید: ${due}`,reply_markup:{inline_keyboard:[[{text:'ثبت پرداخت',callback_data:`inst:pay:${plan.installment_id}`},{text:'جزئیات',callback_data:`inst:view:${plan.installment_id}`}]]}})))sent.push(`installment:${plan.installment_id}:${next.number}`);}
   }
   if(prefs?.debts!==false){
     const debts=await repo.list('Debts',{limit:2000,filter:x=>x.status!=='settled'&&x.due_date&&x.due_date<=today});for(const debt of debts)if(await once(repo,'debt',debt.debt_id,debt.due_date,()=>telegramCall(env,'sendMessage',{chat_id:owner,text:`👥 یادآوری ${debt.kind==='receivable'?'طلب':'بدهی'}\nمانده: ${moneyFa(Number(debt.principal_amount)-Number(debt.settled_amount||0))}`,reply_markup:{inline_keyboard:[[{text:'مشاهده',callback_data:`debt:view:${debt.debt_id}`}]]}})))sent.push(`debt:${debt.debt_id}`);

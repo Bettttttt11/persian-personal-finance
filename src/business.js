@@ -15,6 +15,22 @@ function todayTehran(){return new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Te
 async function ensureRef(repo,sheet,id){if(!id)return null;const row=await repo.getById(sheet,id);if(!row)throw new Error('VALIDATION');return row;}
 function isMissing(v){return v===undefined||v===null||v==='';}
 function cashAccountRequired(type){return ['expense','income','transfer','installment_payment','receivable','refund'].includes(type);}
+function installmentDueDates(plan){
+  const count=Math.max(0,Number(plan.installment_count||0));let dates=safeJsonParse(plan.due_dates_json,[]);
+  if(Array.isArray(dates)&&dates.length)return dates.slice(0,count||dates.length).map(x=>{try{return parseDateInput(x)}catch{return String(x||'')}}).filter(Boolean);
+  if(!count||!plan.start_date)return[];let jy,jm;try{[jy,jm]=formatJalali(plan.start_date).split('/').map(Number)}catch{return[]}
+  const dueDay=Math.max(1,Math.min(31,Number(plan.due_day||1))),out=[];
+  for(let i=0;i<count;i++){let y=jy+Math.floor((jm-1+i)/12),m=((jm-1+i)%12)+1,d=dueDay,iso='';while(d>=28&&!iso){try{iso=parseDateInput(`${y}/${String(m).padStart(2,'0')}/${String(d).padStart(2,'0')}`)}catch{d--}}if(!iso)try{iso=parseDateInput(`${y}/${String(m).padStart(2,'0')}/01`)}catch{}if(iso)out.push(iso);}
+  return out;
+}
+function installmentPlannedAmounts(plan){
+  const count=Math.max(1,Number(plan.installment_count||1)),total=Math.max(0,Number(plan.total_amount||0)),def=Math.max(0,Number(plan.default_installment_amount||0)),out=[];let left=total;
+  for(let i=0;i<count;i++){const slots=count-i;let amount=i===count-1?left:(def>0?Math.min(def,left):Math.ceil(left/slots));if(amount<0)amount=0;out.push(amount);left=Math.max(0,left-amount);}return out;
+}
+function installmentSchedule(plan,payments=[]){
+  const dates=installmentDueDates(plan),amounts=installmentPlannedAmounts(plan),today=todayTehran(),paidTotal=payments.reduce((s,x)=>s+Number(x.amount||0),0);let available=paidTotal;
+  return amounts.map((planned_amount,i)=>{const paid_amount=Math.min(planned_amount,Math.max(0,available));available=Math.max(0,available-paid_amount);const due_date=dates[i]||'';const status=paid_amount>=planned_amount&&planned_amount>0?'paid':paid_amount>0?'partial':due_date&&due_date<today?'overdue':'upcoming';return{number:i+1,due_date,planned_amount,paid_amount,remaining_amount:Math.max(0,planned_amount-paid_amount),status};});
+}
 
 export class FinanceService{
   constructor(repo,actor='owner'){this.repo=repo;this.actor=actor;}
@@ -93,7 +109,7 @@ export class FinanceService{
     for(const p of debtPayments)await this.recalculateDebt(p.debt_id);for(const p of installmentPayments)await this.recalculateInstallment(p.installment_id);for(const link of links){if(restoring)await this.recalculateDebt(link.to_id);else await this.repo.updateById('Debts',link.to_id,{status:'void'});}
   }
   async recalculateDebt(debtId){const d=await ensureRef(this.repo,'Debts',debtId),payments=await this.repo.list('DebtPayments',{limit:10000,filter:x=>x.debt_id===debtId}),txs=await this.repo.list('Transactions',{limit:20000});const byId=new Map(txs.map(x=>[x.transaction_id,x])),settled=payments.reduce((sum,p)=>{const tx=byId.get(p.transaction_id);return sum+((tx&&!bool(tx.is_deleted)&&String(tx.status||'confirmed')==='confirmed')?Number(p.amount||0):0)},0),status=settled>=Number(d.principal_amount||0)?'settled':settled>0?'partial':'open';await this.repo.updateById('Debts',debtId,{settled_amount:settled,status});return{...d,settled_amount:settled,status};}
-  async recalculateInstallment(installmentId){const plan=await ensureRef(this.repo,'Installments',installmentId),payments=await this.repo.list('InstallmentPayments',{limit:10000,filter:x=>x.installment_id===installmentId}),txs=await this.repo.list('Transactions',{limit:20000}),byId=new Map(txs.map(x=>[x.transaction_id,x])),paid=payments.reduce((sum,p)=>{const tx=byId.get(p.transaction_id);return sum+((tx&&!bool(tx.is_deleted)&&String(tx.status||'confirmed')==='confirmed')?Number(p.amount||0):0)},0),status=paid>=Number(plan.total_amount||0)?'completed':'active';if(plan.status!==status)await this.repo.updateById('Installments',installmentId,{status});return{...plan,paid,status};}
+  async recalculateInstallment(installmentId){const plan=await ensureRef(this.repo,'Installments',installmentId);if(bool(plan.is_deleted))throw new Error('NOT_FOUND');const payments=await this.repo.list('InstallmentPayments',{limit:10000,filter:x=>x.installment_id===installmentId}),txs=await this.repo.list('Transactions',{limit:20000}),byId=new Map(txs.map(x=>[x.transaction_id,x])),activePayments=payments.filter(p=>{const tx=byId.get(p.transaction_id);return tx&&!bool(tx.is_deleted)&&String(tx.status||'confirmed')==='confirmed'}),paid=activePayments.reduce((sum,p)=>sum+Number(p.amount||0),0),schedule=installmentSchedule(plan,activePayments),status=paid>=Number(plan.total_amount||0)?'completed':schedule.some(x=>x.status==='overdue')?'overdue':'active';if(plan.status!==status)await this.repo.updateById('Installments',installmentId,{status});return{...plan,paid,status,schedule};}
 
   async accountBalances(accountIds=null){
     const accounts=await this.repo.list('Accounts',{limit:1000});
@@ -135,16 +151,18 @@ export class FinanceService{
     const settled=Number(d.settled_amount||0)+value;await this.repo.updateById('Debts',debtId,{settled_amount:settled,status:settled>=Number(d.principal_amount)?'settled':'partial'});await this.link('debt',debtId,'transaction',tx.transaction_id,'settlement');return{transaction:tx,payment};
   }
   async payInstallment(installmentId,{amount,fee_amount=0,account_id,date,note='',source='installment'}){
-    const plan=await ensureRef(this.repo,'Installments',installmentId),value=intMoney(amount||plan.default_installment_amount,false);
+    const plan=await ensureRef(this.repo,'Installments',installmentId);if(bool(plan.is_deleted))throw new Error('NOT_FOUND');const value=intMoney(amount||plan.default_installment_amount,false);
     const tx=await this.createTransaction({type:'installment_payment',amount:value,fee_amount,account_id:account_id||plan.account_id,person_id:plan.person_id,project_id:plan.project_id,category_id:'',description:plan.title,note,transaction_date:date,metadata:{installment_id:installmentId}},source);
     const payment=await this.repo.insert('InstallmentPayments',{payment_id:uuid(),installment_id:installmentId,transaction_id:tx.transaction_id,amount:value,fee_amount:intMoney(fee_amount),payment_date:tx.transaction_date_iso,note,created_at:nowIso(),schema_version:SCHEMA_VERSION});
     const recalculated=await this.recalculateInstallment(installmentId),paid=recalculated.paid;
     await this.link('installment',installmentId,'transaction',tx.transaction_id,'payment');return{transaction:tx,payment,paid};
   }
   async installmentSummary(id){
-    const plan=await ensureRef(this.repo,'Installments',id),allPayments=await this.repo.list('InstallmentPayments',{limit:5000,filter:x=>x.installment_id===id}),txs=await this.repo.list('Transactions',{limit:20000}),byId=new Map(txs.map(x=>[x.transaction_id,x])),payments=allPayments.filter(p=>{const tx=byId.get(p.transaction_id);return tx&&!bool(tx.is_deleted)&&String(tx.status||'confirmed')==='confirmed'});
-    const paid=payments.reduce((s,x)=>s+Number(x.amount||0),0),fees=payments.reduce((s,x)=>s+Number(x.fee_amount||0),0);return{plan:{...plan,status:paid>=Number(plan.total_amount||0)?'completed':plan.status==='overdue'?'overdue':'active'},payments,paid,fees,remaining:Math.max(0,Number(plan.total_amount||0)-paid),payment_count:payments.length};
+    const plan=await ensureRef(this.repo,'Installments',id);if(bool(plan.is_deleted))throw new Error('NOT_FOUND');const allPayments=await this.repo.list('InstallmentPayments',{limit:5000,filter:x=>x.installment_id===id}),txs=await this.repo.list('Transactions',{limit:20000}),byId=new Map(txs.map(x=>[x.transaction_id,x])),payments=allPayments.filter(p=>{const tx=byId.get(p.transaction_id);return tx&&!bool(tx.is_deleted)&&String(tx.status||'confirmed')==='confirmed'});
+    const paid=payments.reduce((s,x)=>s+Number(x.amount||0),0),fees=payments.reduce((s,x)=>s+Number(x.fee_amount||0),0),schedule=installmentSchedule(plan,payments),computedStatus=paid>=Number(plan.total_amount||0)?'completed':schedule.some(x=>x.status==='overdue')?'overdue':'active',next=schedule.find(x=>x.status!=='paid')||null;return{plan:{...plan,status:computedStatus},payments,schedule,next_due_date:next?.due_date||'',next_installment_number:next?.number||null,paid,fees,remaining:Math.max(0,Number(plan.total_amount||0)-paid),payment_count:payments.length};
   }
+  async softDeleteInstallment(id){const plan=await ensureRef(this.repo,'Installments',id);if(bool(plan.is_deleted))return plan;return this.repo.updateById('Installments',id,{is_deleted:true,deleted_at:nowIso()},{action:'soft_delete'});}
+  async restoreInstallment(id){const plan=await ensureRef(this.repo,'Installments',id);return this.repo.updateById('Installments',id,{is_deleted:false,deleted_at:''},{action:'restore'});}
 
   async merge(sheet,primaryId,duplicateId){
     const idField=ENTITY_ID[sheet];if(!idField||primaryId===duplicateId)throw new Error('VALIDATION');
