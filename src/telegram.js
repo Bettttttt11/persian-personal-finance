@@ -189,7 +189,7 @@ async function handleText(msg,repo,env,url){
   }
   const mode=await loadState(repo,'bot_mode');
   if(mode?.state.mode==='ai_edit'){
-    const history=Array.isArray(mode.state.history)?mode.state.history:[],draftId=mode.state.draft_id;let result;
+    const history=Array.isArray(mode.state.history)?mode.state.history:[],draftId=mode.state.draft_id;let result;await delIncoming(env,chatId,msg.message_id);await panel(env,chatId,mode.state.message_id,'🤖 <b>دارم پیشنهاد را اصلاح می‌کنم…</b>',kb([[btn('❌ لغو پیشنهاد',`aicancel:${draftId}`)]]));
     try{result=await reviseAiActions(repo,env,draftId,text,history);}catch(error){return panel(env,chatId,mode.state.message_id,`🤖 ${tgEscape(aiErrorText(error))}
 
 پیشنهاد قبلی هنوز دست‌نخورده است.`,kb([[btn('⬅️ بازگشت به پیشنهاد',`aiback:${draftId}`),btn('❌ لغو پیشنهاد',`aicancel:${draftId}`)]]));}
@@ -197,11 +197,11 @@ async function handleText(msg,repo,env,url){
     return showAiResult(repo,env,chatId,mode.state.message_id,result,url,text);
   }
   if(mode?.state.mode==='ai'){
-    const history=Array.isArray(mode.state.history)?mode.state.history:[];let result;
-    try{result=await handleAiText(repo,env,text,history);}catch(error){await telegramCall(env,'sendMessage',{chat_id:chatId,text:`🤖 ${aiErrorText(error)}`});return;}
+    const history=Array.isArray(mode.state.history)?mode.state.history:[];let result;await delIncoming(env,chatId,msg.message_id);await panel(env,chatId,mode.state.message_id,'🤖 <b>دارم بررسی می‌کنم…</b>',kb([[btn('خروج از دستیار','ai:exit')]]));
+    try{result=await handleAiText(repo,env,text,history);}catch(error){return panel(env,chatId,mode.state.message_id,`🤖 ${tgEscape(aiErrorText(error))}`,kb([[btn('خروج از دستیار','ai:exit')]]));}
     const assistant=result.kind==='actions'?`${result.actions.length} اقدام پیشنهادی برای تأیید آماده شد.`:result.kind==='split'?'محاسبه دنگ انجام شد.':String(result.text||'پاسخ آماده شد.');
     mode.state.history=[...history,{role:'user',content:text},{role:'assistant',content:assistant}].slice(-12);await updateDraft(repo,mode.draft,mode.state);
-    return showAiResult(repo,env,chatId,null,result,url,text);
+    return showAiResult(repo,env,chatId,mode.state.message_id,result,url,text);
   }
   if(await quickEntry(repo,env,chatId,text,url)){await delIncoming(env,chatId,msg.message_id);return;}
   await telegramCall(env,'sendMessage',{chat_id:chatId,text:'از منو استفاده کنید یا یک ثبت سریع مثل «ناهار 150000» بفرستید.',reply_markup:mainKeyboard(env,url)});

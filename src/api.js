@@ -13,7 +13,7 @@ import { DEFAULT_CURRENCY, SCHEMA_VERSION, bad, bool, clearCookie as clearCookie
 import { jalaliMonthRangeOffset, parseDateInput } from './jalali.js';
 
 const ENTITY_ALLOWED=new Set(Object.keys(ENTITY_MAP));
-const ALLOWED_SETTINGS=new Set(['session_timeout','keep_original_receipts','receipt_quality','receipt_max_side','budget_thresholds','default_account','default_currency','reminder_preferences','openrouter_text_model','openrouter_vision_model','openrouter_audio_model','openrouter_file_model']);
+const ALLOWED_SETTINGS=new Set(['session_timeout','keep_original_receipts','receipt_quality','receipt_max_side','budget_thresholds','default_account','default_currency','reminder_preferences','openrouter_text_model','openrouter_vision_model','openrouter_audio_model','openrouter_file_model','export_retention_hours']);
 
 function base(env,request){return env.PUBLIC_BASE_URL||new URL(request.url).origin;}
 function withCors(response,request,env){const headers=new Headers(response.headers);for(const [key,value] of Object.entries(corsHeaders(request,base(env,request))))headers.set(key,value);return new Response(response.body,{status:response.status,statusText:response.statusText,headers});}
@@ -135,7 +135,9 @@ export async function handleApi(request,env){
     else if(path==='/api/export/csv'&&request.method==='GET'){
       const filters=filtersFrom(url),rep=await report(repo,filters),displayCurrency=currencyCode(url.searchParams.get('display_currency')||await repo.setting('default_currency',DEFAULT_CURRENCY)),csv=await completeReportCsv(repo,rep,displayCurrency);return withCors(new Response(csv,{headers:{'content-type':'text/csv; charset=utf-8','content-disposition':'attachment; filename="finance-report.csv"',...securityHeaders()}}),request,env);
     }else if(path==='/api/telegram/send-document'&&request.method==='POST'){
-      const form=await request.formData(),file=form.get('file');if(!(file instanceof File)||file.size<=0||file.size>45*1024*1024)throw new Error('VALIDATION');const caption=String(form.get('caption')||'');result={sent:true,message:await telegramSendDocument(env,env.OWNER_TELEGRAM_ID,await file.arrayBuffer(),{filename:file.name||'finance-export.bin',mime:file.type||'application/octet-stream',caption})};
+      const form=await request.formData(),file=form.get('file');if(!(file instanceof File)||file.size<=0||file.size>45*1024*1024)throw new Error('VALIDATION');const caption=String(form.get('caption')||''),message=await telegramSendDocument(env,env.OWNER_TELEGRAM_ID,await file.arrayBuffer(),{filename:file.name||'finance-export.bin',mime:file.type||'application/octet-stream',caption}),retention=Math.max(1,Math.min(20,Number(await repo.setting('export_retention_hours',12)||12)));
+      await repo.insert('Drafts',{draft_id:uuid(),kind:'export_cleanup',owner_telegram_id:String(env.OWNER_TELEGRAM_ID),state_json:JSON.stringify({chat_id:String(env.OWNER_TELEGRAM_ID),message_id:message.message_id,file_name:file.name||'finance-export.bin'}),status:'active',created_at:nowIso(),updated_at:nowIso(),expires_at:new Date(Date.now()+retention*3600e3).toISOString(),schema_version:SCHEMA_VERSION},{audit:false});
+      result={sent:true,message,cleanup_hours:retention};
     }
 
     else if(path==='/api/receipts'&&request.method==='POST')result=await uploadReceipt(request,repo,env);
@@ -185,6 +187,7 @@ function validateSetting(key,value){
   if(key==='session_timeout'&&!['15m','30m','1h','manual'].includes(value))throw new Error('VALIDATION');
   if(key==='receipt_quality'&&(!Number.isInteger(Number(value))||Number(value)<40||Number(value)>95))throw new Error('VALIDATION');
   if(key==='receipt_max_side'&&(!Number.isInteger(Number(value))||Number(value)<600||Number(value)>2400))throw new Error('VALIDATION');
+  if(key==='export_retention_hours'&&(!Number.isInteger(Number(value))||Number(value)<1||Number(value)>20))throw new Error('VALIDATION');
   if(key==='keep_original_receipts'&&typeof value!=='boolean')throw new Error('VALIDATION');
   if(key==='default_currency'&&!['IRR','TOMAN'].includes(String(value||'').toUpperCase()))throw new Error('VALIDATION');
   if(key==='budget_thresholds'){

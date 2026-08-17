@@ -1,6 +1,6 @@
 import { DEFAULT_CURRENCY, SCHEMA_VERSION, bool, currencyCode, digitsEn, json, moneyFa, normalizeText, nowIso, safeJsonParse, tehranTime, toRial, uuid } from './utils.js';
 import { report, personSummary, queryTransactions, summarize } from './reports.js';
-import { parseDateInput } from './jalali.js';
+import { jalaliMonthRange, parseDateInput } from './jalali.js';
 import { calculateSplit } from './business.js';
 
 const OR='https://openrouter.ai/api/v1';
@@ -82,9 +82,9 @@ async function resolveNamed(repo,sheet,name){
 async function compactEntityContext(repo){
   if(typeof repo.prefetch==='function')await repo.prefetch(['Accounts','Categories','People','Projects','Merchants','Installments','Transactions']);
   const defs=[['Accounts','account_id','accounts'],['Categories','category_id','categories'],['People','person_id','people'],['Projects','project_id','projects'],['Merchants','merchant_id','merchants'],['Installments','installment_id','installments']];const out={};
-  const results=await Promise.all(defs.map(async([sheet,id,key])=>{let rows=await repo.list(sheet,{limit:100,filter:x=>!bool(x.archived)&&!bool(x.is_deleted)});if(sheet==='Installments')rows=rows.filter(x=>x.status!=='completed');return[key,rows.slice(0,40).map(x=>({id:x[id],name:x.name||x.title||'',status:x.status||undefined,favorite:bool(x.favorite)||undefined}))]}));
+  const results=await Promise.all(defs.map(async([sheet,id,key])=>{let rows=await repo.list(sheet,{limit:100,filter:x=>!bool(x.archived)&&!bool(x.is_deleted)});if(sheet==='Installments')rows=rows.filter(x=>x.status!=='completed');return[key,rows.slice(0,20).map(x=>({id:x[id],name:x.name||x.title||'',status:x.status||undefined,favorite:bool(x.favorite)||undefined}))]}));
   for(const [key,rows] of results)out[key]=rows;
-  const txs=await queryTransactions(repo,{});out.recent_transactions=txs.slice(0,24).map(t=>({id:t.transaction_id,type:t.type,amount:Number(t.amount||0),date:t.transaction_date_iso,time:t.transaction_time||'00:00:00',description:t.description||'',account_id:t.account_id||'',destination_account_id:t.destination_account_id||'',category_id:t.category_id||'',person_id:t.person_id||'',project_id:t.project_id||'',merchant_id:t.merchant_id||''}));
+  const txs=await queryTransactions(repo,{});out.recent_transactions=txs.slice(0,12).map(t=>({id:t.transaction_id,type:t.type,amount:Number(t.amount||0),date:t.transaction_date_iso,time:t.transaction_time||'00:00:00',description:t.description||'',account_id:t.account_id||'',destination_account_id:t.destination_account_id||'',category_id:t.category_id||'',person_id:t.person_id||'',project_id:t.project_id||'',merchant_id:t.merchant_id||''}));
   out.defaults={account_id:await repo.setting('default_account',''),today:parseDateInput('امروز'),yesterday:parseDateInput('دیروز'),now_time:tehranTime(),currency:currencyCode(await repo.setting('default_currency',DEFAULT_CURRENCY))};return out;
 }
 export async function planUserText(repo,env,text,history=[]){
@@ -123,11 +123,19 @@ async function friendlyChat(repo,env,text,history=[]){const model=await activeTe
 
 const FA_NUM={صفر:0,یک:1,یه:1,دو:2,سه:3,چهار:4,پنج:5,شش:6,هفت:7,هشت:8,نه:9,ده:10,یازده:11,دوازده:12,سیزده:13,چهارده:14,پانزده:15,شانزده:16,هفده:17,هجده:18,نوزده:19,بیست:20,سی:30,چهل:40,پنجاه:50,شصت:60,هفتاد:70,هشتاد:80,نود:90,صد:100,یکصد:100,دویست:200,سیصد:300,چهارصد:400,پانصد:500,ششصد:600,هفتصد:700,هشتصد:800,نهصد:900};
 function persianNumberWords(value=''){const tokens=normalizeText(value).split(/\s+/).filter(x=>x&&x!=='و'),mult={هزار:1e3,میلیون:1e6,میلیارد:1e9};let total=0,group=0,seen=false;for(const token of tokens){if(mult[token]){if(!seen&&group===0)return null;total+=(group||1)*mult[token];group=0;seen=true;continue}if(FA_NUM[token]===undefined)return null;group+=FA_NUM[token];seen=true}const n=total+group;return seen&&Number.isSafeInteger(n)&&n>0?n:null;}
-export function explicitMoneyMentions(text=''){
-  const clean=digitsEn(String(text||'')).replace(/[٬,،_]/g,'').replace(/٫/g,'.'),out=[],numeric=/(\d+(?:\.\d+)?)\s*(هزار|میلیون|میلیارد)?\s*(تومان|تومن|ریال)/g;let m;
-  while((m=numeric.exec(clean))){const scale=m[2]==='هزار'?1e3:m[2]==='میلیون'?1e6:m[2]==='میلیارد'?1e9:1,value=Number(m[1])*scale;if(!Number.isSafeInteger(value)||value<=0)continue;const before=clean.slice(Math.max(0,m.index-24),m.index),fee=/کارمزد/.test(before);out.push({amount:value,currency:/تومان|تومن/.test(m[3])?'TOMAN':'IRR',fee,index:m.index,end:numeric.lastIndex});}
+export function explicitMoneyMentions(text='',defaultCurrency=DEFAULT_CURRENCY){
+  const clean=digitsEn(String(text||'')).replace(/[٬,،_]/g,'').replace(/٫/g,'.'),out=[],numeric=/(\d+(?:\.\d+)?)\s*(هزار|میلیون|میلیارد)?\s*(تومان|تومن|ریال)?/g;let m;
+  while((m=numeric.exec(clean))){
+    const raw=String(m[1]||''),scale=m[2]==='هزار'?1e3:m[2]==='میلیون'?1e6:m[2]==='میلیارد'?1e9:1,hasUnit=!!m[3],hasScale=!!m[2],digitsOnly=raw.replace('.','');
+    if(!hasUnit&&!hasScale&&digitsOnly.length<4)continue;
+    const before=normalizeText(clean.slice(Math.max(0,m.index-28),m.index)),after=normalizeText(clean.slice(numeric.lastIndex,numeric.lastIndex+12));
+    if(!hasUnit&&!hasScale&&(/(?:ساعت|پیگیری|مرجع|شناسه|کد|شماره|تلفن)\s*$/.test(before)||/^\s*[\/:.-]/.test(after)))continue;
+    const value=Number(raw)*scale;if(!Number.isSafeInteger(value)||value<=0)continue;
+    const fee=/کارمزد\s*$/.test(before)||/کارمزد/.test(before.slice(-16)),currency=hasUnit?(/تومان|تومن/.test(m[3])?'TOMAN':'IRR'):currencyCode(defaultCurrency);
+    out.push({amount:value,currency,fee,index:m.index,end:numeric.lastIndex,explicit_unit:hasUnit});
+  }
   const words='(?:صفر|یک|یه|دو|سه|چهار|پنج|شش|هفت|هشت|نه|ده|یازده|دوازده|سیزده|چهارده|پانزده|شانزده|هفده|هجده|نوزده|بیست|سی|چهل|پنجاه|شصت|هفتاد|هشتاد|نود|صد|یکصد|دویست|سیصد|چهارصد|پانصد|ششصد|هفتصد|هشتصد|نهصد|هزار|میلیون|میلیارد|و)',wordRe=new RegExp(`(${words}(?:\\s+${words})*)\\s*(تومان|تومن|ریال)`,'g');
-  while((m=wordRe.exec(normalizeText(clean)))){const value=persianNumberWords(m[1]);if(!value)continue;const start=m.index,end=wordRe.lastIndex;if(out.some(x=>start<x.end&&end>x.index))continue;const before=normalizeText(clean).slice(Math.max(0,start-24),start),fee=/کارمزد/.test(before);out.push({amount:value,currency:/تومان|تومن/.test(m[2])?'TOMAN':'IRR',fee,index:start,end});}
+  while((m=wordRe.exec(normalizeText(clean)))){const value=persianNumberWords(m[1]);if(!value)continue;const start=m.index,end=wordRe.lastIndex;if(out.some(x=>start<x.end&&end>x.index))continue;const before=normalizeText(clean).slice(Math.max(0,start-24),start),fee=/کارمزد/.test(before);out.push({amount:value,currency:/تومان|تومن/.test(m[2])?'TOMAN':'IRR',fee,index:start,end,explicit_unit:true});}
   return out.sort((a,b)=>a.index-b.index).map(({end,...x})=>x);
 }
 export function inferNaturalTransactionTime(text='',now=new Date()){
@@ -140,7 +148,7 @@ export function inferNaturalTransactionTime(text='',now=new Date()){
 }
 function convertUnit(value,from,to){if(from===to)return value;return from==='TOMAN'&&to==='IRR'?value*10:value/10;}
 function applyUserMoneyAndTime(actions,text,defaultCurrency){
-  const list=(actions||[]).map(a=>({action:a.action,data:{...(a.data||{})}})),mentions=explicitMoneyMentions(text),main=mentions.filter(x=>!x.fee),fees=mentions.filter(x=>x.fee),time=inferNaturalTransactionTime(text);let mi=0,fi=0;
+  const list=(actions||[]).map(a=>({action:a.action,data:{...(a.data||{})}})),mentions=explicitMoneyMentions(text,defaultCurrency),main=mentions.filter(x=>!x.fee),fees=mentions.filter(x=>x.fee),time=inferNaturalTransactionTime(text);let mi=0,fi=0;
   for(const a of list){if(a.action!=='create_transaction'&&a.action!=='pay_installment'&&a.action!=='settle_debt')continue;const x=a.data;if(main[mi]){x.amount=main[mi].amount;x.currency=main[mi].currency;mi++;}else x.currency=x.currency||defaultCurrency;if(fees[fi]){x.fee_amount=Math.round(convertUnit(fees[fi].amount,fees[fi].currency,x.currency||defaultCurrency));fi++;}if(time&&!x.transaction_time)x.transaction_time=time;}
   return list;
 }
@@ -150,7 +158,7 @@ async function normalizeAction(repo,action){
   if(action.action==='create_transaction'){
     x.type=String(x.type||'expense');x.currency=x.currency||currency;if(!x.transaction_date&&!x.transaction_date_iso)x.transaction_date=parseDateInput('امروز');
     for(const [sheet,idKey,nameKey] of [['Accounts','account_id','account_name'],['Accounts','destination_account_id','destination_account_name'],['Categories','category_id','category_name'],['People','person_id','person_name'],['Projects','project_id','project_name'],['Merchants','merchant_id','merchant_name']]){const id=await namedId(repo,sheet,x,idKey,nameKey);if(isPlainObject(id)&&id.ambiguous)return{clarify:`${x[nameKey]} چند مورد دارد؛ دقیق‌تر انتخاب کن.`,options:id.options.map(o=>o.name)};if(id)x[idKey]=id;}
-    if(CASH_TYPES.has(x.type)&&!x.account_id){const accounts=await repo.list('Accounts',{limit:500,filter:a=>!bool(a.archived)&&!bool(a.is_deleted)}),def=String(await repo.setting('default_account','')||''),valid=accounts.find(a=>String(a.account_id)===def);if(valid)x.account_id=valid.account_id;else if(accounts.length===1)x.account_id=accounts[0].account_id;else return{clarify:'این تراکنش از کدام حساب ثبت شود؟',options:accounts.slice(0,8).map(a=>a.name)};}
+    if(CASH_TYPES.has(x.type)&&!x.account_id){const accounts=await repo.list('Accounts',{limit:500,filter:a=>!bool(a.archived)&&!bool(a.is_deleted)}),def=String(await repo.setting('default_account','')||''),valid=accounts.find(a=>String(a.account_id)===def),favorites=accounts.filter(a=>bool(a.favorite));if(valid)x.account_id=valid.account_id;else if(favorites.length===1)x.account_id=favorites[0].account_id;else if(accounts.length===1)x.account_id=accounts[0].account_id;else return{clarify:'این تراکنش از کدام حساب ثبت شود؟',options:accounts.slice(0,8).map(a=>a.name)};}
     if(x.type==='transfer'){if(!x.destination_account_id){const accounts=await repo.list('Accounts',{limit:500,filter:a=>!bool(a.archived)&&!bool(a.is_deleted)&&String(a.account_id)!==String(x.account_id)});if(accounts.length===1)x.destination_account_id=accounts[0].account_id;else return{clarify:'انتقال به کدام حساب مقصد است؟',options:accounts.slice(0,8).map(a=>a.name)};}if(String(x.account_id)===String(x.destination_account_id))return{clarify:'حساب مبدا و مقصد انتقال نمی‌توانند یکی باشند.',options:[]};}
     if(['debt','receivable'].includes(x.type)&&!x.person_id)return{clarify:'این بدهی/طلب مربوط به چه شخصی است؟',options:(await repo.list('People',{limit:100,filter:p=>!bool(p.archived)&&!bool(p.is_deleted)})).slice(0,8).map(p=>p.name)};
     if(!Number.isSafeInteger(Number(x.amount))||Number(x.amount)<=0)return{clarify:'مبلغ این تراکنش چقدر است؟',options:[]};
@@ -166,20 +174,53 @@ async function normalizeAction(repo,action){
 export async function normalizeAiActions(repo,actions=[],sourceText=''){const currency=currencyCode(await repo.setting('default_currency',DEFAULT_CURRENCY)),prepared=applyUserMoneyAndTime(actions,sourceText,currency),out=[];for(const item of prepared){const n=await normalizeAction(repo,item);if(n.clarify)return n;out.push(n.action);}return{actions:out};}
 
 const FOOD_TERMS=['غذا','خوراک','ناهار','شام','صبحانه','رستوران','کافه','فست فود','فستفود','پیتزا','ساندویچ','برگر','قهوه','چای','سوپرمارکت','سوپر مارکت','تنقلات','میان وعده'];
+function quickGreeting(text=''){
+  const q=normalizeText(text).replace(/[!؟?.,،]/g,'').trim();
+  if(/^(سلام|درود|سلام خوبی|سلام چطوری|خوبی|چطوری|چه خبر|صبح بخیر|شب بخیر)$/.test(q))return{kind:'chat',text:q.includes('صبح')?'صبح بخیر 👋 چه کمکی از دستم برمیاد؟':q.includes('شب')?'شب بخیر 👋 بگو ببینم چی لازم داری.':'سلام 👋 بگو ببینم چی می‌خوای ثبت یا بررسی کنیم؟',fast_path:true};
+  return null;
+}
+async function saveActionProposal(repo,env,text,actions,reply=''){
+  const normalized=await normalizeAiActions(repo,actions,text);if(normalized.clarify)return{kind:'clarify',text:normalized.clarify,options:normalized.options||[]};
+  const proposal=await repo.insert('Drafts',{draft_id:uuid(),kind:'ai_actions',owner_telegram_id:String(env.OWNER_TELEGRAM_ID),state_json:json({text,actions:normalized.actions,executed:{}}),status:'active',created_at:nowIso(),updated_at:nowIso(),expires_at:new Date(Date.now()+24*3600e3).toISOString(),schema_version:SCHEMA_VERSION});
+  return{kind:'actions',draft_id:proposal.draft_id,actions:normalized.actions,text:reply||'',fast_path:true};
+}
+async function fastSimpleAction(repo,env,text){
+  const q=normalizeText(text),blocked=/(انتقال|قسط|بدهی|طلب|بازپرداخت|پس داد|حذف|پاک کن|ویرایش|اصلاح)/.test(q);if(blocked)return null;
+  const expense=/(خریدم|خرید کردم|خرید|خرج کردم|هزینه کردم|ناهار|شام|صبحانه|کافه|رستوران|قبض|کرایه|اسنپ|تاکسی|سوپرمارکت|سوپر مارکت)/.test(q),income=/(حقوق|درآمد|دستمزد|واریزی|واریز شد|فروختم|فروش کردم|دریافتی)/.test(q);
+  if(expense===income)return null;
+  const currency=currencyCode(await repo.setting('default_currency',DEFAULT_CURRENCY)),money=explicitMoneyMentions(text,currency).find(x=>!x.fee);if(!money)return null;
+  let date=parseDateInput('امروز');if(q.includes('دیروز'))date=parseDateInput('دیروز');
+  const time=inferNaturalTransactionTime(text)||tehranTime(),description=String(text||'').trim().slice(0,220);
+  return saveActionProposal(repo,env,text,[{action:'create_transaction',data:{type:income?'income':'expense',amount:money.amount,currency:money.currency,transaction_date:date,transaction_time:time,description}}]);
+}
 async function fastHistoryRead(repo,text){
-  const q=normalizeText(text),food=/(چی|چه).*(خوردم|خوردیم|غذا|ناهار|شام|صبحانه)|(خوردم|خوردیم).*(چی|چه)/.test(q),day=q.includes('دیروز')?'دیروز':q.includes('امروز')?'امروز':'';if(!food||!day)return null;const date=parseDateInput(day),txs=await queryTransactions(repo,{from:date,to:date,type:'expense'}),[cats,merchants]=await Promise.all([repo.list('Categories',{limit:5000}),repo.list('Merchants',{limit:5000})]),cat=Object.fromEntries(cats.map(x=>[x.category_id,x.name||''])),mer=Object.fromEntries(merchants.map(x=>[x.merchant_id,x.name||''])),items=txs.filter(t=>{const hay=normalizeText([t.description,cat[t.category_id],mer[t.merchant_id]].join(' '));return FOOD_TERMS.some(w=>hay.includes(normalizeText(w)))}),currency=currencyCode(await repo.setting('default_currency',DEFAULT_CURRENCY));return{kind:'read',text:sanitizeAiText(deterministicReadText({data:{count:items.length,transactions:items,summary:summarize(items)}},currency)),data:{count:items.length,transactions:items,summary:summarize(items)},fast_path:true};
+  const q=normalizeText(text),currency=currencyCode(await repo.setting('default_currency',DEFAULT_CURRENCY)),food=/(چی|چه).*(خوردم|خوردیم|غذا|ناهار|شام|صبحانه)|(خوردم|خوردیم).*(چی|چه)/.test(q),last=/(آخرین|اخری|جدیدترین).*(تراکنش|خرج|هزینه|خرید|درآمد)|(تراکنش|خرج|هزینه|خرید|درآمد).*(آخرین|اخری|جدیدترین)/.test(q);
+  if(last){
+    const onlyIncome=/درآمد/.test(q),onlyExpense=/(خرج|هزینه|خرید)/.test(q),txs=await queryTransactions(repo,onlyIncome?{type:'income'}:onlyExpense?{type:'expense'}:{}),items=txs.slice(0,Math.min(5,txs.length));
+    return{kind:'read',text:sanitizeAiText(deterministicReadText({data:{count:items.length,transactions:items,summary:summarize(items)}},currency)),data:{count:items.length,transactions:items,summary:summarize(items)},fast_path:true};
+  }
+  let from='',to='';if(q.includes('دیروز'))from=to=parseDateInput('دیروز');else if(q.includes('امروز'))from=to=parseDateInput('امروز');else if(/این ماه|ماه جاری|همین ماه/.test(q)){const range=jalaliMonthRange();from=range.start;to=range.end;}
+  if(!from&&!food)return null;
+  const asksFinance=food||/(چقدر|جمع|مجموع|تراکنش|خرج|هزینه|درآمد|خریدم|پرداخت)/.test(q);if(!asksFinance)return null;
+  const txs=await queryTransactions(repo,{from,to});
+  if(food){
+    const [cats,merchants]=await Promise.all([repo.list('Categories',{limit:5000}),repo.list('Merchants',{limit:5000})]),cat=Object.fromEntries(cats.map(x=>[x.category_id,x.name||''])),mer=Object.fromEntries(merchants.map(x=>[x.merchant_id,x.name||''])),items=txs.filter(t=>t.type==='expense'&&FOOD_TERMS.some(w=>normalizeText([t.description,cat[t.category_id],mer[t.merchant_id]].join(' ')).includes(normalizeText(w))));
+    return{kind:'read',text:sanitizeAiText(deterministicReadText({data:{count:items.length,transactions:items,summary:summarize(items)}},currency)),data:{count:items.length,transactions:items,summary:summarize(items)},fast_path:true};
+  }
+  const summary=summarize(txs);
+  if(/درآمد/.test(q)&&!/(خرج|هزینه)/.test(q))return{kind:'read',text:`درآمد این بازه ${moneyFa(summary.income,currency)} بوده.`,data:{summary},fast_path:true};
+  if(/خرج|هزینه/.test(q)&&!/درآمد/.test(q))return{kind:'read',text:`خرج خالص این بازه ${moneyFa(summary.net_expense,currency)} و کارمزد ${moneyFa(summary.fees,currency)} بوده.`,data:{summary},fast_path:true};
+  return{kind:'read',text:sanitizeAiText(deterministicReadText({data:{count:txs.length,transactions:txs.slice(0,12),summary}},currency)),data:{count:txs.length,transactions:txs.slice(0,12),summary},fast_path:true};
 }
 
 export async function handleAiText(repo,env,text,history=[]){
+  const greeting=quickGreeting(text);if(greeting)return greeting;
+  const simple=await fastSimpleAction(repo,env,text);if(simple)return simple;
   const fast=await fastHistoryRead(repo,text);if(fast)return fast;
   let plan;try{plan=await planUserText(repo,env,text,history);}catch(error){try{return{kind:'chat',text:await friendlyChat(repo,env,text,history),fallback:true};}catch{throw error;}}
   if(plan.kind==='read'){const result=await executeRead(repo,plan);if(result.clarify)return{kind:'clarify',text:result.clarify,options:result.options,entity:result.entity||''};const currency=currencyCode(await repo.setting('default_currency',DEFAULT_CURRENCY));return{kind:'read',text:sanitizeAiText(deterministicReadText(result,currency)),data:result.data};}
   if(plan.kind==='split'){try{const currency=currencyCode(await repo.setting('default_currency',DEFAULT_CURRENCY));return{kind:'split',result:calculateSplit(normalizeAiSplit(plan.split,currency))}}catch{return{kind:'clarify',text:'اطلاعات دنگ کامل نیست؛ مبلغ کل، افراد و پرداختی هر نفر را بگو.'}}}
-  if(plan.kind==='actions'){
-    const normalized=await normalizeAiActions(repo,plan.actions,text);if(normalized.clarify)return{kind:'clarify',text:normalized.clarify,options:normalized.options||[]};
-    const proposal=await repo.insert('Drafts',{draft_id:uuid(),kind:'ai_actions',owner_telegram_id:String(env.OWNER_TELEGRAM_ID),state_json:json({text,actions:normalized.actions,executed:{}}),status:'active',created_at:nowIso(),updated_at:nowIso(),expires_at:new Date(Date.now()+24*3600e3).toISOString(),schema_version:SCHEMA_VERSION});
-    return{kind:'actions',draft_id:proposal.draft_id,actions:normalized.actions,text:plan.reply||''};
-  }
+  if(plan.kind==='actions')return saveActionProposal(repo,env,text,plan.actions,plan.reply||'');
   if(plan.kind==='chat'&&!plan.reply)plan.reply=await friendlyChat(repo,env,text,history);return{kind:plan.kind,text:sanitizeAiText(plan.reply||plan.question||'یکم بیشتر توضیح می‌دی؟'),options:plan.options||[]};
 }
 

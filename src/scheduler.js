@@ -1,4 +1,4 @@
-import { nowIso, uuid, SCHEMA_VERSION, moneyFa, bool, DEFAULT_CURRENCY, currencyCode } from './utils.js';
+import { nowIso, uuid, SCHEMA_VERSION, moneyFa, bool, DEFAULT_CURRENCY, currencyCode, safeJsonParse } from './utils.js';
 import { telegramCall, webAppUrl } from './telegram-api.js';
 import { budgetProgress, queryTransactions } from './reports.js';
 import { FinanceService } from './business.js';
@@ -30,6 +30,12 @@ export async function runDaily(repo,env,requestUrl='https://worker.invalid'){
     const txs=await queryTransactions(repo,{from:period.start,to:today}),budgets=await budgetProgress(repo,period,txs);
     for(const budget of budgets){const thresholds=[...(budget.thresholds||[80,90,100])].map(Number).sort((a,b)=>b-a),hit=thresholds.find(x=>budget.percent>=x);if(hit&&await once(repo,`budget${hit}`,budget.budget_id,periodKey,()=>telegramCall(env,'sendMessage',{chat_id:owner,text:`⚠️ بودجه به ${Number(budget.percent).toLocaleString('fa-IR')}٪ رسیده است.\nمصرف: ${moneyFa(budget.used,currency)} از ${moneyFa(budget.amount,currency)}`,reply_markup:{inline_keyboard:dashboardRow(env,requestUrl,'گزارش بودجه')?[dashboardRow(env,requestUrl,'گزارش بودجه')]:[]}})))sent.push(`budget:${budget.budget_id}`);}
   }
-  const expiredDrafts=await repo.list('Drafts',{limit:5000,filter:x=>x.status==='active'&&x.expires_at&&x.expires_at<nowIso()});for(const draft of expiredDrafts)await repo.updateById('Drafts',draft.draft_id,{status:'expired'},{audit:false});
-  return{date:today,sent};
+  const dueExports=await repo.list('Drafts',{limit:5000,filter:x=>x.kind==='export_cleanup'&&x.status==='active'&&x.expires_at&&x.expires_at<nowIso()});
+  for(const draft of dueExports){
+    const state=safeJsonParse(draft.state_json,{});
+    try{if(state.chat_id&&state.message_id)await telegramCall(env,'deleteMessage',{chat_id:state.chat_id,message_id:state.message_id});}catch{}
+    await repo.updateById('Drafts',draft.draft_id,{status:'done',updated_at:nowIso()},{audit:false});
+  }
+  const expiredDrafts=await repo.list('Drafts',{limit:5000,filter:x=>x.kind!=='export_cleanup'&&x.status==='active'&&x.expires_at&&x.expires_at<nowIso()});for(const draft of expiredDrafts)await repo.updateById('Drafts',draft.draft_id,{status:'expired'},{audit:false});
+  return{date:today,sent,export_cleanup:dueExports.length};
 }
