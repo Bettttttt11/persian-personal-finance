@@ -21,12 +21,22 @@ export async function validateTelegramInitData(initData,botToken,ownerId){
 }
 
 async function lockState(repo,telegramId){return repo.findOne('AuthState',r=>String(r.telegram_id)===String(telegramId));}
+async function pinHash(env,pin){if(!env.SESSION_SECRET||String(env.SESSION_SECRET).length<24)throw new Error('CONFIG_SESSION_SECRET');return hmacHex(env.SESSION_SECRET,`pin:v1:${String(pin||'')}`);}
+export async function pinRequired(repo,env){
+  const configured=await repo.setting('pin_enabled',null);if(configured!==null&&configured!==undefined)return configured===true||String(configured).toLowerCase()==='true';
+  const stored=String(await repo.setting('pin_hash','')||'');return !!stored||!!env.BOT_PIN;
+}
+export async function pinStatus(repo,env){return{enabled:await pinRequired(repo,env),custom:!!String(await repo.setting('pin_hash','')||''),legacy_env:!!env.BOT_PIN};}
+export async function setPin(repo,env,pin){const value=String(pin||'').trim();if(value.length<4||value.length>32)throw new Error('VALIDATION');await repo.setSetting('pin_hash',await pinHash(env,value));await repo.setSetting('pin_enabled',true);return pinStatus(repo,env);}
+export async function disablePin(repo,env){await repo.setSetting('pin_enabled',false);return pinStatus(repo,env);}
 export async function verifyPin(repo,env,telegramId,pin){
+  if(!await pinRequired(repo,env))return true;
   const st=await lockState(repo,telegramId);if(st?.lock_until&&new Date(st.lock_until)>new Date())throw new Error('PIN_LOCKED');
-  const ok=env.BOT_PIN&&constantTimeEqual(String(pin||''),String(env.BOT_PIN));
+  const stored=String(await repo.setting('pin_hash','')||''),candidate=String(pin||''),ok=stored?constantTimeEqual(await pinHash(env,candidate),stored):!!env.BOT_PIN&&constantTimeEqual(candidate,String(env.BOT_PIN));
   if(!ok){const fails=Number(st?.pin_fail_count||0)+1,lock=fails>=5?new Date(Date.now()+15*60*1000).toISOString():'';if(st)await repo.updateById('AuthState',st.auth_state_id,{pin_fail_count:fails,lock_until:lock},{audit:false});else await repo.insert('AuthState',{auth_state_id:uuid(),telegram_id:String(telegramId),pin_fail_count:fails,lock_until:lock,updated_at:nowIso()},{audit:false});throw new Error(lock?'PIN_LOCKED':'PIN_WRONG');}
   if(st)await repo.updateById('AuthState',st.auth_state_id,{pin_fail_count:0,lock_until:''},{audit:false});return true;
 }
+export async function miniAuthConfig(request,repo,env){const body=await request.json(),user=await validateTelegramInitData(body.initData,env.TELEGRAM_BOT_TOKEN,env.OWNER_TELEGRAM_ID);return{user:{id:user.id,first_name:user.first_name||''},pin_required:await pinRequired(repo,env)};}
 
 async function signedCookieValue(env,sessionId,nonce){
   if(!env.SESSION_SECRET||String(env.SESSION_SECRET).length<24)throw new Error('CONFIG_SESSION_SECRET');

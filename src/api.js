@@ -1,6 +1,6 @@
 import { Repository } from './repository.js';
 import { migrate, SHEETS, ID_FIELD } from './schema.js';
-import { authenticateMiniApi, loginMiniApp, revokeSession } from './auth.js';
+import { authenticateMiniApi, loginMiniApp, miniAuthConfig, pinStatus, revokeSession } from './auth.js';
 import { FinanceService, ENTITY_MAP, calculateSplit } from './business.js';
 import { dashboard, report, comparePeriods, queryTransactions, personSummary, projectSummary } from './reports.js';
 import { previewImport, confirmImport } from './imports.js';
@@ -10,7 +10,7 @@ import { getCapabilities, handleAiText, confirmAiActions, removeAiAction, revise
 import { saveReceipt, replaceWithWebp, getPrivate, putPrivate, deleteReceipt, saveInboxFile, storageStats, hasR2, probePrivateStorage, storageKind } from './storage.js';
 import { telegramCall, telegramSendDocument } from './telegram-api.js';
 import { DEFAULT_CURRENCY, SCHEMA_VERSION, bad, bool, clearCookie as clearCookieUtil, corsHeaders, currencyCode, fromRial, nowIso, ok, safeJsonParse, securityHeaders, toCsv, toRial, userError, uuid } from './utils.js';
-import { parseDateInput } from './jalali.js';
+import { jalaliMonthRangeOffset, parseDateInput } from './jalali.js';
 
 const ENTITY_ALLOWED=new Set(Object.keys(ENTITY_MAP));
 const ALLOWED_SETTINGS=new Set(['session_timeout','keep_original_receipts','receipt_quality','receipt_max_side','budget_thresholds','default_account','default_currency','reminder_preferences','openrouter_text_model','openrouter_vision_model','openrouter_audio_model','openrouter_file_model']);
@@ -23,14 +23,14 @@ function cleanForClient(row){if(!row)return row;const out={...row};delete out.__
 function cleanDeep(value){if(Array.isArray(value))return value.map(cleanDeep);if(value&&typeof value==='object'){const out={};for(const [key,item] of Object.entries(value)){if(key==='__row'||key==='token_hash')continue;out[key]=cleanDeep(item);}return out;}return value;}
 function paginate(url){return{limit:Math.max(1,Math.min(200,Number(url.searchParams.get('limit')||50))),offset:Math.max(0,Number(url.searchParams.get('offset')||0))};}
 function filtersFrom(url){
-  const keys=['from','to','type','account_id','category_id','person_id','project_id','merchant_id','tag_id','source','status','q'],filters={};
+  const keys=['from','to','type','account_id','destination_account_id','category_id','person_id','project_id','merchant_id','tag_id','installment_id','source','status','q','time_from','time_to'],filters={};
   for(const key of keys){const value=url.searchParams.get(key);if(value)filters[key]=value;}
-  for(const key of ['min_amount','max_amount']){const value=url.searchParams.get(key);if(value!==null)filters[key]=Number(value);}
+  for(const key of ['min_amount','max_amount','min_fee','max_fee']){const value=url.searchParams.get(key);if(value!==null&&value!=='')filters[key]=Number(value);}
   for(const key of ['has_fee','has_receipt','starred','installment','debt_receivable'])if(url.searchParams.has(key))filters[key]=url.searchParams.get(key)==='true';
   return filters;
 }
 function validateConfig(env){
-  const required=['TELEGRAM_BOT_TOKEN','OWNER_TELEGRAM_ID','SPREADSHEET_ID','GOOGLE_SERVICE_ACCOUNT_JSON','BOT_PIN','SESSION_SECRET'],missing=required.filter(key=>!env[key]);
+  const required=['TELEGRAM_BOT_TOKEN','OWNER_TELEGRAM_ID','SPREADSHEET_ID','GOOGLE_SERVICE_ACCOUNT_JSON','SESSION_SECRET'],missing=required.filter(key=>!env[key]);
   const checks={required_secrets:{ok:missing.length===0,missing},session_secret:{ok:!!env.SESSION_SECRET&&String(env.SESSION_SECRET).length>=24},storage:{configured:hasR2(env),kind:storageKind(env)},openrouter:{configured:!!env.OPENROUTER_API_KEY},public_base_url:{configured:!!env.PUBLIC_BASE_URL}};
   return checks;
 }
@@ -45,12 +45,14 @@ export async function handleApi(request,env){
   if(request.method==='OPTIONS')return withCors(new Response(null,{status:204,headers:securityHeaders()}),request,env);
   const url=new URL(request.url),path=url.pathname,repo=new Repository(env,'mini_app');
   try{
+    if(path==='/api/auth/config'&&request.method==='POST')return withCors(ok({data:await miniAuthConfig(request,repo,env)}),request,env);
     if(path==='/api/auth/login'&&request.method==='POST'){
       const login=await loginMiniApp(request,repo,env),response=ok({user:{id:login.user.id,first_name:login.user.first_name||''}});response.headers.append('set-cookie',login.cookie);return withCors(response,request,env);
     }
     const auth=await authenticateMiniApi(request,repo,env);
     if(request.method==='GET'&&path==='/api/dashboard')await repo.prefetch(['Transactions','Accounts','Categories','People','Projects','Merchants','Tags','Installments','Debts','Inbox','Budgets','Settings']);
     else if(request.method==='GET'&&path==='/api/lookups')await repo.prefetch(['Accounts','Categories','People','Projects','Tags','Merchants','Installments']);
+    else if(request.method==='GET'&&path==='/api/reports')await repo.prefetch(['Transactions','Accounts','Categories','People','Projects','Merchants','Tags','EntityTags']);
     else if(request.method==='GET'&&path==='/api/transactions'){const names=['Transactions'];if(url.searchParams.get('tag_id')||url.searchParams.get('q'))names.push('EntityTags','Tags');if(url.searchParams.get('q'))names.push('Accounts','Categories','People','Projects','Merchants');await repo.prefetch(names);}
     const finance=new FinanceService(repo,'owner');
     if(path==='/api/auth/logout'&&request.method==='POST'){
@@ -82,8 +84,11 @@ export async function handleApi(request,env){
 
     else if(path==='/api/search'&&request.method==='GET'){
       const all=await queryTransactions(repo,{q:url.searchParams.get('q')||''});result={items:all.slice(0,100).map(cleanForClient),total:all.length};
-    }else if(path==='/api/reports'&&request.method==='GET')result=await report(repo,filtersFrom(url));
-    else if(path==='/api/reports/compare'&&request.method==='GET')result=await comparePeriods(repo,{from:url.searchParams.get('from')||'',to:url.searchParams.get('to')||''},{from:url.searchParams.get('previous_from')||'',to:url.searchParams.get('previous_to')||''});
+    }else if(path==='/api/calendar/month'&&request.method==='GET')result=jalaliMonthRangeOffset(Math.max(-240,Math.min(0,Number(url.searchParams.get('offset')||0))));
+    else if(path==='/api/reports'&&request.method==='GET')result=await report(repo,filtersFrom(url));
+    else if(path==='/api/reports/compare'&&request.method==='GET'){
+      const common=filtersFrom(url);delete common.from;delete common.to;result=await comparePeriods(repo,{...common,from:url.searchParams.get('from')||'',to:url.searchParams.get('to')||''},{...common,from:url.searchParams.get('previous_from')||'',to:url.searchParams.get('previous_to')||''});
+    }
     else if(path==='/api/accounts/balances'&&request.method==='GET'){
       const rows=await repo.list('Accounts',{limit:1000,includeDeleted:false}),balances=await finance.accountBalances(rows.map(x=>x.account_id));result={items:rows.map(account=>({...cleanForClient(account),balance:Number(balances[account.account_id]||0)}))};
     }else if(/^\/api\/accounts\/[^/]+\/transactions$/.test(path)&&request.method==='GET'){
@@ -128,7 +133,7 @@ export async function handleApi(request,env){
     }else if(/^\/api\/restore\/receipts\/[^/]+$/.test(path)&&request.method==='POST')result=await restoreReceiptFiles(request,repo,env,path.split('/')[4]);
 
     else if(path==='/api/export/csv'&&request.method==='GET'){
-      const transactions=await queryTransactions(repo,filtersFrom(url)),displayCurrency=currencyCode(url.searchParams.get('display_currency')||await repo.setting('default_currency',DEFAULT_CURRENCY)),rows=transactions.map(t=>({...t,amount:fromRial(t.amount,displayCurrency),fee_amount:fromRial(t.fee_amount,displayCurrency),currency:displayCurrency}));return withCors(new Response(toCsv(rows,SHEETS.Transactions),{headers:{'content-type':'text/csv; charset=utf-8','content-disposition':'attachment; filename="transactions.csv"',...securityHeaders()}}),request,env);
+      const filters=filtersFrom(url),rep=await report(repo,filters),displayCurrency=currencyCode(url.searchParams.get('display_currency')||await repo.setting('default_currency',DEFAULT_CURRENCY)),csv=await completeReportCsv(repo,rep,displayCurrency);return withCors(new Response(csv,{headers:{'content-type':'text/csv; charset=utf-8','content-disposition':'attachment; filename="finance-report.csv"',...securityHeaders()}}),request,env);
     }else if(path==='/api/telegram/send-document'&&request.method==='POST'){
       const form=await request.formData(),file=form.get('file');if(!(file instanceof File)||file.size<=0||file.size>45*1024*1024)throw new Error('VALIDATION');const caption=String(form.get('caption')||'');result={sent:true,message:await telegramSendDocument(env,env.OWNER_TELEGRAM_ID,await file.arrayBuffer(),{filename:file.name||'finance-export.bin',mime:file.type||'application/octet-stream',caption})};
     }
@@ -193,7 +198,7 @@ function validateSetting(key,value){
   if(key.startsWith('openrouter_')&&key.endsWith('_model')&&value!==null&&typeof value!=='string')throw new Error('VALIDATION');
   if(key==='default_account'&&value!==null&&typeof value!=='string')throw new Error('VALIDATION');
 }
-async function publicSettings(repo,env){const out={};for(const key of ALLOWED_SETTINGS)out[key]=await repo.setting(key,key==='default_currency'?DEFAULT_CURRENCY:null);out.storage_currency=await repo.setting('storage_currency','IRR');out.storage_configured=hasR2(env);out.storage_kind=storageKind(env);out.r2_configured=hasR2(env);out.openrouter_configured=!!env.OPENROUTER_API_KEY;return out;}
+async function publicSettings(repo,env){const out={};for(const key of ALLOWED_SETTINGS)out[key]=await repo.setting(key,key==='default_currency'?DEFAULT_CURRENCY:null);out.storage_currency=await repo.setting('storage_currency','IRR');out.storage_configured=hasR2(env);out.storage_kind=storageKind(env);out.r2_configured=hasR2(env);out.openrouter_configured=!!env.OPENROUTER_API_KEY;out.pin=await pinStatus(repo,env);return out;}
 const ENTITY_MONEY_FIELDS={Accounts:['opening_balance'],Projects:['budget'],Installments:['total_amount','default_installment_amount'],Recurring:['amount'],Budgets:['amount'],Debts:['principal_amount','settled_amount']};
 function normalizeEntityMoney(sheet,row,inputCurrency=DEFAULT_CURRENCY){for(const key of ENTITY_MONEY_FIELDS[sheet]||[]){if(row[key]===undefined||row[key]==='')continue;const n=Number(row[key]);if(!Number.isSafeInteger(n)||n<0)throw new Error('INVALID_MONEY');row[key]=toRial(n,inputCurrency);}return row;}
 function normalizeSplitMoney(body,inputCurrency=DEFAULT_CURRENCY){const currency=currencyCode(inputCurrency),out={...body,total_amount:toRial(Number(body.total_amount||0),currency)};out.items=(body.items||[]).map(x=>({...x,paid_amount:toRial(Number(x.paid_amount||0),currency),share_value:body.mode==='custom'?toRial(Number(x.share_value||0),currency):x.share_value}));return out;}
@@ -258,6 +263,14 @@ async function replaceTransactionTags(repo,transactionId,tagIds){
 async function txDetail(repo,id){
   const transaction=await repo.getById('Transactions',id);if(!transaction)throw new Error('NOT_FOUND');const [receipts,joins,tags,links]=await Promise.all([repo.list('Receipts',{limit:100,filter:x=>x.transaction_id===id&&x.ai_status!=='deleted'}),repo.list('EntityTags',{limit:1000,filter:x=>x.entity_type==='transaction'&&x.entity_id===id}),repo.list('Tags',{limit:1000}),repo.list('Links',{limit:2000,filter:x=>x.from_id===id||x.to_id===id})]);const tagMap=Object.fromEntries(tags.map(x=>[x.tag_id,x]));return{transaction:cleanForClient(transaction),receipts:receipts.map(cleanForClient),tags:joins.map(j=>tagMap[j.tag_id]).filter(Boolean).map(cleanForClient),links:links.map(cleanForClient)};
 }
+function csvCell(v){return '"'+String(v??'').replace(/"/g,'""')+'"';}
+async function completeReportCsv(repo,rep,displayCurrency){
+  const maps=await lookupBundle(repo),map=(rows,id)=>Object.fromEntries((rows||[]).map(x=>[x[id],x.name||x.title||''])),accounts=map(maps.accounts,'account_id'),categories=map(maps.categories,'category_id'),people=map(maps.people,'person_id'),projects=map(maps.projects,'project_id'),merchants=map(maps.merchants,'merchant_id'),unit=displayCurrency==='TOMAN'?'تومان':'ریال',m=n=>fromRial(Number(n||0),displayCurrency);
+  const summary=[['گزارش مالی کامل',''],['از تاریخ',rep.from||''],['تا تاریخ',rep.to||''],['واحد',unit],['تعداد تراکنش',rep.summary.count||0],['درآمد',m(rep.summary.income)],['مخارج خالص',m(rep.summary.net_expense)],['کارمزد',m(rep.summary.fees)],['بازپرداخت',m(rep.summary.refunds)],['خالص',m(rep.summary.net)],['ورودی حساب',m(rep.summary.inflow)],['خروجی حساب',m(rep.summary.outflow)],['جمع انتقال',m(rep.summary.transfers)],[]];
+  const headers=['شناسه','تاریخ شمسی','تاریخ ISO','ساعت','نوع','مبلغ '+unit,'کارمزد '+unit,'حساب','حساب مقصد','دسته','شخص','پروژه','فروشنده','شرح','یادداشت','پیگیری','مرجع','منبع','وضعیت'];
+  const rows=(rep.transactions||[]).map(t=>[t.transaction_id,t.transaction_date,t.transaction_date_iso,t.transaction_time||'00:00:00',t.type,m(t.amount),m(t.fee_amount),accounts[t.account_id]||'',accounts[t.destination_account_id]||'',categories[t.category_id]||'',people[t.person_id]||'',projects[t.project_id]||'',merchants[t.merchant_id]||'',t.description,t.note,t.tracking_number,t.reference_number,t.source,t.status||'confirmed']);
+  return '\ufeff'+[...summary.map(r=>r.map(csvCell).join(',')),headers.map(csvCell).join(','),...rows.map(r=>r.map(csvCell).join(','))].join('\r\n');
+}
 async function uploadReceipt(request,repo,env){
   if(!hasR2(env))throw new Error('R2_DISABLED');const form=await request.formData(),file=form.get('file'),thumb=form.get('thumb'),original=form.get('original'),transactionId=String(form.get('transaction_id')||'');if(!(file instanceof File)||!transactionId||file.size>8*1024*1024)throw new Error('VALIDATION');const keep=await repo.setting('keep_original_receipts',false);return saveReceipt(repo,env,{transaction_id:transactionId,bytes:await file.arrayBuffer(),mime_type:file.type||'image/webp',thumbBytes:thumb instanceof File?await thumb.arrayBuffer():null,source:'mini_app',keepOriginal:keep,originalBytes:keep&&original instanceof File?await original.arrayBuffer():null});
 }
@@ -297,7 +310,7 @@ async function restoreReceiptFiles(request,repo,env,id){
 
 async function health(repo,env){
   const storage=await probePrivateStorage(env);
-  const out={config:validateConfig(env),telegram:{ok:false},google_sheets:{ok:false},storage:{ok:storage.ok,configured:storage.kind!=='none',kind:storage.kind},r2:{ok:storage.ok,configured:storage.kind!=='none'},openrouter:{ok:false,configured:!!env.OPENROUTER_API_KEY},schema:{ok:false,version:SCHEMA_VERSION}};
+  const out={config:validateConfig(env),pin:await pinStatus(repo,env),telegram:{ok:false},google_sheets:{ok:false},storage:{ok:storage.ok,configured:storage.kind!=='none',kind:storage.kind},r2:{ok:storage.ok,configured:storage.kind!=='none'},openrouter:{ok:false,configured:!!env.OPENROUTER_API_KEY},schema:{ok:false,version:SCHEMA_VERSION}};
   try{await repo.spreadsheetInfo();out.google_sheets.ok=true;}catch{}
   try{await telegramCall(env,'getMe',{});out.telegram.ok=true;}catch{}
   try{const caps=await getCapabilities(repo,env);out.openrouter.ok=!!caps.configured&&!!caps.text;out.openrouter.capabilities={text:caps.text,vision:caps.vision,audio:caps.audio,file:caps.file};out.openrouter.model=caps.models?.text?.id||'';out.openrouter.requested_model=caps.requested_models?.text||'';out.openrouter.fallback_used=!!caps.fallback_used;out.openrouter.error=caps.error||'';}catch{}

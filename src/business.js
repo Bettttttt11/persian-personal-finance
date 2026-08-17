@@ -135,28 +135,28 @@ export class FinanceService{
   }
   async accountBalance(accountId){await ensureRef(this.repo,'Accounts',accountId);return Number((await this.accountBalances([accountId]))[String(accountId)]||0);}
 
-  async createReceivable({person_id,amount,account_id,project_id='',description='',note='',date,fee_amount=0,source='manual',due_date='',currency=''}){
+  async createReceivable({person_id,amount,account_id,project_id='',description='',note='',date,transaction_time='',fee_amount=0,source='manual',due_date='',currency=''}){
     await ensureRef(this.repo,'People',person_id);
-    const tx=await this.createTransaction({type:'receivable',person_id,amount,currency,account_id,project_id,description,note,transaction_date:date,fee_amount},source);
+    const tx=await this.createTransaction({type:'receivable',person_id,amount,currency,account_id,project_id,description,note,transaction_date:date,transaction_time,fee_amount},source);
     const debt=await this.repo.insert('Debts',{debt_id:uuid(),kind:'receivable',person_id,principal_amount:tx.amount,settled_amount:0,status:'open',due_date:due_date?parseDateInput(due_date):'',note,project_id,created_at:nowIso(),updated_at:nowIso(),schema_version:SCHEMA_VERSION});
     await this.link('transaction',tx.transaction_id,'debt',debt.debt_id,'origin');return{transaction:tx,debt};
   }
-  async createDebt({person_id,amount,account_id='',project_id='',description='',note='',date,source='manual',due_date='',currency=''}){
+  async createDebt({person_id,amount,account_id='',project_id='',description='',note='',date,transaction_time='',source='manual',due_date='',currency=''}){
     await ensureRef(this.repo,'People',person_id);
-    const tx=await this.createTransaction({type:'debt',person_id,amount,currency,account_id,project_id,description,note,transaction_date:date,metadata:{direction:'origin'}},source);
+    const tx=await this.createTransaction({type:'debt',person_id,amount,currency,account_id,project_id,description,note,transaction_date:date,transaction_time,metadata:{direction:'origin'}},source);
     const debt=await this.repo.insert('Debts',{debt_id:uuid(),kind:'debt',person_id,principal_amount:tx.amount,settled_amount:0,status:'open',due_date:due_date?parseDateInput(due_date):'',note,project_id,created_at:nowIso(),updated_at:nowIso(),schema_version:SCHEMA_VERSION});
     await this.link('transaction',tx.transaction_id,'debt',debt.debt_id,'origin');return{transaction:tx,debt};
   }
-  async settleDebt(debtId,{amount,account_id,fee_amount=0,note='',date,source='manual',currency=''}){
+  async settleDebt(debtId,{amount,account_id,fee_amount=0,note='',date,transaction_time='',source='manual',currency=''}){
     let d=await ensureRef(this.repo,'Debts',debtId);d=await this.recalculateDebt(debtId);const inputCurrency=currency||await this.repo.setting('default_currency',DEFAULT_CURRENCY),value=toRial(intMoney(amount,false),inputCurrency),fee=toRial(intMoney(fee_amount),inputCurrency),remaining=Number(d.principal_amount||0)-Number(d.settled_amount||0);if(value>remaining)throw new Error('VALIDATION');
     const type=d.kind==='receivable'?'income':'debt',metadata=d.kind==='receivable'?{debt_settlement:true,direction:'settlement'}:{direction:'settlement'};
-    const tx=await this.createTransaction({type,amount:value,currency:'IRR',account_id,person_id:d.person_id,project_id:d.project_id,fee_amount:fee,note,transaction_date:date,metadata},source);
+    const tx=await this.createTransaction({type,amount:value,currency:'IRR',account_id,person_id:d.person_id,project_id:d.project_id,fee_amount:fee,note,transaction_date:date,transaction_time,metadata},source);
     const payment=await this.repo.insert('DebtPayments',{payment_id:uuid(),debt_id:debtId,transaction_id:tx.transaction_id,amount:value,fee_amount:fee,payment_date:tx.transaction_date_iso,account_id,note,created_at:nowIso(),schema_version:SCHEMA_VERSION});
     const settled=Number(d.settled_amount||0)+value;await this.repo.updateById('Debts',debtId,{settled_amount:settled,status:settled>=Number(d.principal_amount)?'settled':'partial'});await this.link('debt',debtId,'transaction',tx.transaction_id,'settlement');return{transaction:tx,payment};
   }
-  async payInstallment(installmentId,{amount,fee_amount=0,account_id,date,note='',source='installment',currency=''}){
+  async payInstallment(installmentId,{amount,fee_amount=0,account_id,date,transaction_time='',note='',source='installment',currency=''}){
     const plan=await ensureRef(this.repo,'Installments',installmentId);if(bool(plan.is_deleted))throw new Error('NOT_FOUND');const inputCurrency=currency||await this.repo.setting('default_currency',DEFAULT_CURRENCY),value=(amount===undefined||amount===null||amount==='')?Number(plan.default_installment_amount||0):toRial(intMoney(amount,false),inputCurrency),fee=toRial(intMoney(fee_amount),inputCurrency);if(!Number.isSafeInteger(value)||value<=0)throw new Error('INVALID_MONEY');
-    const tx=await this.createTransaction({type:'installment_payment',amount:value,currency:'IRR',fee_amount:fee,account_id:account_id||plan.account_id,person_id:plan.person_id,project_id:plan.project_id,category_id:'',description:plan.title,note,transaction_date:date,metadata:{installment_id:installmentId}},source);
+    const tx=await this.createTransaction({type:'installment_payment',amount:value,currency:'IRR',fee_amount:fee,account_id:account_id||plan.account_id,person_id:plan.person_id,project_id:plan.project_id,category_id:'',description:plan.title,note,transaction_date:date,transaction_time,metadata:{installment_id:installmentId}},source);
     const payment=await this.repo.insert('InstallmentPayments',{payment_id:uuid(),installment_id:installmentId,transaction_id:tx.transaction_id,amount:value,fee_amount:fee,payment_date:tx.transaction_date_iso,note,created_at:nowIso(),schema_version:SCHEMA_VERSION});
     const recalculated=await this.recalculateInstallment(installmentId),paid=recalculated.paid;
     await this.link('installment',installmentId,'transaction',tx.transaction_id,'payment');return{transaction:tx,payment,paid};

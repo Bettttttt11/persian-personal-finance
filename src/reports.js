@@ -11,27 +11,33 @@ export async function lookupMaps(repo){
 }
 
 export async function queryTransactions(repo,filters={}){
-  let txs=await repo.list('Transactions',{limit:20000,includeDeleted:false});
-  txs=txs.filter(t=>confirmed(t)&&inRange(t,filters.from,filters.to));
-  const eq=['type','account_id','category_id','person_id','project_id','merchant_id','source','status'];for(const key of eq)if(filters[key])txs=txs.filter(t=>String(t[key])===String(filters[key]));
+  let txs=await repo.list('Transactions',{limit:50000,includeDeleted:false});
+  txs=txs.filter(t=>inRange(t,filters.from,filters.to));
+  if(filters.status)txs=txs.filter(t=>String(t.status||'confirmed')===String(filters.status));else txs=txs.filter(confirmed);
+  const eq=['type','account_id','destination_account_id','category_id','person_id','project_id','merchant_id','source'];for(const key of eq)if(filters[key])txs=txs.filter(t=>String(t[key])===String(filters[key]));
+  if(filters.time_from)txs=txs.filter(t=>String(t.transaction_time||'00:00:00')>=String(filters.time_from));
+  if(filters.time_to)txs=txs.filter(t=>String(t.transaction_time||'23:59:59')<=String(filters.time_to));
   if(filters.starred!==undefined)txs=txs.filter(t=>bool(t.is_starred)===bool(filters.starred));
   if(filters.has_fee)txs=txs.filter(t=>Number(t.fee_amount||0)>0);
   if(filters.has_receipt)txs=txs.filter(t=>Number(t.receipt_count||0)>0);
+  if(filters.installment_id)txs=txs.filter(t=>String(safeJsonParse(t.metadata_json,{})?.installment_id||'')===String(filters.installment_id));
   if(filters.installment)txs=txs.filter(t=>t.type==='installment_payment'||safeJsonParse(t.metadata_json,{})?.installment_id);
   if(filters.debt_receivable)txs=txs.filter(t=>['debt','receivable'].includes(t.type)||safeJsonParse(t.metadata_json,{})?.debt_settlement);
-  if(filters.min_amount!==undefined)txs=txs.filter(t=>Number(t.amount||0)>=Number(filters.min_amount));
-  if(filters.max_amount!==undefined)txs=txs.filter(t=>Number(t.amount||0)<=Number(filters.max_amount));
+  if(filters.min_amount!==undefined&&Number.isFinite(Number(filters.min_amount)))txs=txs.filter(t=>Number(t.amount||0)>=Number(filters.min_amount));
+  if(filters.max_amount!==undefined&&Number.isFinite(Number(filters.max_amount)))txs=txs.filter(t=>Number(t.amount||0)<=Number(filters.max_amount));
+  if(filters.min_fee!==undefined&&Number.isFinite(Number(filters.min_fee)))txs=txs.filter(t=>Number(t.fee_amount||0)>=Number(filters.min_fee));
+  if(filters.max_fee!==undefined&&Number.isFinite(Number(filters.max_fee)))txs=txs.filter(t=>Number(t.fee_amount||0)<=Number(filters.max_fee));
 
   let tagNamesByTx={};
   if(filters.tag_id||filters.q){
-    const [joins,tags]=await Promise.all([repo.list('EntityTags',{limit:20000,filter:x=>x.entity_type==='transaction'}),repo.list('Tags',{limit:5000})]);
+    const [joins,tags]=await Promise.all([repo.list('EntityTags',{limit:50000,filter:x=>x.entity_type==='transaction'}),repo.list('Tags',{limit:5000})]);
     const names=Object.fromEntries(tags.map(x=>[x.tag_id,x.name]));
     for(const j of joins)(tagNamesByTx[j.entity_id]??=[]).push(names[j.tag_id]||'');
     if(filters.tag_id){const ids=new Set(joins.filter(x=>x.tag_id===filters.tag_id).map(x=>x.entity_id));txs=txs.filter(t=>ids.has(t.transaction_id));}
   }
   if(filters.q){
     const q=normalizeText(filters.q),maps=await lookupMaps(repo);
-    txs=txs.filter(t=>normalizeText([t.amount,t.description,t.note,t.tracking_number,t.reference_number,t.bank_transaction_id,maps.people[t.person_id],maps.merchants[t.merchant_id],maps.projects[t.project_id],maps.categories[t.category_id],...(tagNamesByTx[t.transaction_id]||[])].join(' ')).includes(q));
+    txs=txs.filter(t=>normalizeText([t.amount,t.fee_amount,t.type,t.description,t.note,t.tracking_number,t.reference_number,t.bank_transaction_id,maps.accounts[t.account_id],maps.accounts[t.destination_account_id],maps.people[t.person_id],maps.merchants[t.merchant_id],maps.projects[t.project_id],maps.categories[t.category_id],...(tagNamesByTx[t.transaction_id]||[])].join(' ')).includes(q));
   }
   txs.sort((a,b)=>String(b.transaction_date_iso).localeCompare(String(a.transaction_date_iso))||String(b.transaction_time||'00:00:00').localeCompare(String(a.transaction_time||'00:00:00'))||String(b.created_at).localeCompare(String(a.created_at)));return txs;
 }
@@ -58,15 +64,21 @@ export function summarize(txs){
     }
   }
   const netExpense=expense-refunds;
-  return{expense,income,fees,refunds,net_expense:netExpense,net:income-netExpense-fees,outflow,inflow,transfers,receivables_created,debt_settlements,by_category:byCategory,daily};
+  return{count:txs.length,expense,income,fees,refunds,net_expense:netExpense,net:income-netExpense-fees,outflow,inflow,transfers,receivables_created,debt_settlements,by_category:byCategory,daily};
 }
+function breakdownRows(txs,key,map={}){const sums=new Map();for(const t of txs){const id=String(t[key]||'');if(!id)continue;const cur=sums.get(id)||{id,name:map[id]||'—',amount:0,fees:0,count:0};cur.amount+=Number(t.amount||0);cur.fees+=Number(t.fee_amount||0);cur.count++;sums.set(id,cur);}return[...sums.values()].sort((a,b)=>b.amount-a.amount);}
+function typeBreakdown(txs){const sums=new Map();for(const t of txs){const id=String(t.type||'');const cur=sums.get(id)||{id,name:id,amount:0,fees:0,count:0};cur.amount+=Number(t.amount||0);cur.fees+=Number(t.fee_amount||0);cur.count++;sums.set(id,cur);}return[...sums.values()].sort((a,b)=>b.amount-a.amount);}
 
 export async function report(repo,{from,to,...filters}={}){
   if(!from&&!to){const range=jalaliMonthRange(),today=tehranToday();from=range.start;to=range.end<today?range.end:today;}
   const txs=await queryTransactions(repo,{from,to,...filters}),summary=summarize(txs),maps=await lookupMaps(repo);
-  const categories=Object.entries(summary.by_category).map(([id,amount])=>({category_id:id,name:maps.categories[id]||'بدون دسته',amount})).sort((a,b)=>b.amount-a.amount);
-  return{from,to,summary:{...summary,by_category:undefined},categories,transactions:txs};
+  const categories=Object.entries(summary.by_category).map(([id,amount])=>({category_id:id,name:maps.categories[id]||'بدون دسته',amount,count:txs.filter(t=>(t.category_id||'بدون دسته')===id).length})).sort((a,b)=>b.amount-a.amount);
+  const breakdowns={
+    types:typeBreakdown(txs),accounts:breakdownRows(txs,'account_id',maps.accounts),destination_accounts:breakdownRows(txs,'destination_account_id',maps.accounts),people:breakdownRows(txs,'person_id',maps.people),projects:breakdownRows(txs,'project_id',maps.projects),merchants:breakdownRows(txs,'merchant_id',maps.merchants),sources:breakdownRows(txs,'source',{})
+  };
+  return{from,to,filters,summary:{...summary,by_category:undefined},categories,breakdowns,transactions:txs};
 }
+
 export async function currentMonthReport(repo){const range=jalaliMonthRange();return report(repo,{from:range.start,to:range.end});}
 export async function comparePeriods(repo,a,b){const [current,previous]=await Promise.all([report(repo,a),report(repo,b)]),pct=(x,y)=>y===0?null:Math.round(((x-y)/Math.abs(y))*1000)/10;return{current,previous,change:{expense_pct:pct(current.summary.net_expense,previous.summary.net_expense),income_pct:pct(current.summary.income,previous.summary.income),fees_pct:pct(current.summary.fees,previous.summary.fees)}};}
 

@@ -1,4 +1,4 @@
-export const SCHEMA_VERSION = 9;
+export const SCHEMA_VERSION = 10;
 export const DEFAULT_CURRENCY = 'IRR';
 export const STORAGE_CURRENCY = 'IRR';
 export const SESSION_TIMEOUTS = { '15m': 900, '30m': 1800, '1h': 3600, manual: null };
@@ -22,7 +22,7 @@ export function digitsEn(v='') {
 export function normalizeSpace(v='') { return digitsEn(v).replace(/[\u200c\u200f\u202a-\u202e]/g,' ').replace(/\s+/g,' ').trim(); }
 export function normalizeText(v='') { return normalizeSpace(v).toLowerCase().replace(/[ي]/g,'ی').replace(/[ك]/g,'ک'); }
 export function parseMoney(v) {
-  const s=digitsEn(v).replace(/[,_،\s]/g,'').replace(/تومان|تومن|ریال/g,'');
+  const s=digitsEn(v).replace(/[,_،٬٫\s]/g,'').replace(/تومان|تومن|ریال/g,'');
   if(!/^-?\d+$/.test(s)) throw new Error('INVALID_MONEY');
   const n=Number(s); if(!Number.isSafeInteger(n)) throw new Error('INVALID_MONEY'); return n;
 }

@@ -21,8 +21,9 @@ export function parseDateInput(input,now=new Date()){
   if(!validGregorian(year,month,day))throw new Error('VALIDATION');return`${year}-${String(month).padStart(2,'0')}-${String(day).padStart(2,'0')}`;
 }
 export function formatJalali(iso){const [y,m,d]=String(iso).slice(0,10).split('-').map(Number);if(!validGregorian(y,m,d))throw new Error('VALIDATION');const j=gregorianToJalali(y,m,d);return`${j.jy}/${String(j.jm).padStart(2,'0')}/${String(j.jd).padStart(2,'0')}`;}
-export function jalaliMonthRange(now=new Date()){
-  const today=tehranToday(now),[gy,gm,gd]=today.split('-').map(Number),j=gregorianToJalali(gy,gm,gd),first=jalaliToGregorian(j.jy,j.jm,1);let ny=j.jy,nm=j.jm+1;if(nm===13){nm=1;ny++;}const next=jalaliToGregorian(ny,nm,1),start=`${first.gy}-${String(first.gm).padStart(2,'0')}-${String(first.gd).padStart(2,'0')}`,end=addIsoDays(`${next.gy}-${String(next.gm).padStart(2,'0')}-${String(next.gd).padStart(2,'0')}`,-1);return{start,end,jy:j.jy,jm:j.jm};
+export function jalaliMonthRange(now=new Date()){return jalaliMonthRangeOffset(0,now);}
+export function jalaliMonthRangeOffset(offset=0,now=new Date()){
+  const today=tehranToday(now),[gy,gm,gd]=today.split('-').map(Number),cur=gregorianToJalali(gy,gm,gd),total=cur.jy*12+(cur.jm-1)+Number(offset||0),jy=Math.floor(total/12),jm=mod(total,12)+1,first=jalaliToGregorian(jy,jm,1);let ny=jy,nm=jm+1;if(nm===13){nm=1;ny++;}const next=jalaliToGregorian(ny,nm,1),start=`${first.gy}-${String(first.gm).padStart(2,'0')}-${String(first.gd).padStart(2,'0')}`,end=addIsoDays(`${next.gy}-${String(next.gm).padStart(2,'0')}-${String(next.gd).padStart(2,'0')}`,-1),names=['فروردین','اردیبهشت','خرداد','تیر','مرداد','شهریور','مهر','آبان','آذر','دی','بهمن','اسفند'];return{start,end,jy,jm,label:`${names[jm-1]} ${jy}`,today,current:Number(offset||0)===0};
 }
 export function nextJalaliMonthDate(iso,months=1){
   const [gy,gm,gd]=String(iso).slice(0,10).split('-').map(Number),j=gregorianToJalali(gy,gm,gd);let total=j.jy*12+(j.jm-1)+months,year=Math.floor(total/12),month=mod(total,12)+1,day=j.jd;while(day>28&&!validJalali(year,month,day))day--;const g=jalaliToGregorian(year,month,day);return`${g.gy}-${String(g.gm).padStart(2,'0')}-${String(g.gd).padStart(2,'0')}`;
