@@ -1,4 +1,4 @@
-export const SCHEMA_VERSION = 11;
+export const SCHEMA_VERSION = 12;
 export const DEFAULT_CURRENCY = 'IRR';
 export const STORAGE_CURRENCY = 'IRR';
 export const SESSION_TIMEOUTS = { '15m': 900, '30m': 1800, '1h': 3600, manual: null };

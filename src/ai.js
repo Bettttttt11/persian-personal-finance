@@ -89,7 +89,7 @@ async function compactEntityContext(repo){
 }
 export async function planUserText(repo,env,text,history=[]){
   const model=await activeTextModel(repo,env),context=await compactEntityContext(repo),recent=(Array.isArray(history)?history:[]).slice(-8).map(x=>({role:x.role==='assistant'?'assistant':'user',content:String(x.content||'').slice(0,900)}));
-  const prompt=`تو دستیار مالی شخصی فارسی، صمیمی و دقیق هستی. فقط JSON معتبر مطابق schema برگردان.\nقواعد:\n- سؤال درباره سوابق مالی = kind=read. برای سؤال‌هایی مثل «دیروز چی خوردم؟»، «آخرین خرج‌هام چی بوده؟» یا «برای اسنپ چقدر دادم؟» از metric=search و فیلترهای from/to/category_name/merchant_name/type/query استفاده کن تا کد روی تراکنش‌های واقعی جستجو کند؛ جواب را از خودت نساز.\n- ثبت/ویرایش/حذف/پرداخت = kind=actions و فقط پیشنهاد؛ اجرا بعد از تأیید صریح کاربر است. delete_transaction فقط وقتی کاربر صریحاً حذف تراکنش می‌خواهد و transaction_id باید از recent_transactions باشد.\n- اگر کاربر به «این/همون/قبلی» اشاره کرد از recent_transactions و تاریخچه استفاده کن.\n- اگر اطلاعات اجباری یک اقدام کم است kind=clarify و فقط همان سؤال لازم را بپرس.\n- تاریخ نگفته = امروز ${context.defaults.today}. دیروز = ${context.defaults.yesterday}.\n- اگر حساب نگفته و default account وجود دارد همان ID را بگذار. اگر حساب پیش‌فرض نیست، account_id را خالی بگذار؛ سیستم بعداً اگر فقط یک حساب باشد خودکار پر می‌کند و اگر چند حساب باشد سؤال می‌پرسد.\n- واحد پیش‌فرض وقتی کاربر واحد نگفته ${context.defaults.currency==='TOMAN'?'تومان':'ریال'} است. اگر صریحاً «تومان/تومن» گفت currency=TOMAN و اگر «ریال» گفت currency=IRR. هرگز برای تبدیل واحد صفر اضافه/کم نکن: عدد amount دقیقاً در همان واحدی باشد که کاربر گفته؛ تبدیل را کد انجام می‌دهد. مثال: «100 هزار تومان» => amount=100000,currency=TOMAN و «1.5 میلیون ریال» => amount=1500000,currency=IRR.\n- زمان فعلی تهران ${context.defaults.now_time} است. اگر کاربر زمان انجام تراکنش را گفت، transaction_time را HH:MM:SS بگذار. مثال اگر الان بعد از 16:00 است و گفت «ساعت 4 گرفتم»، منظور آخرین ساعت 4 گذشته یعنی 16:00:00 است، مگر صبح/شب را صریح گفته باشد.\n- create_transaction type یکی از expense,income,transfer,installment_payment,debt,receivable,refund,adjustment. برای transfer مبدا account_id و مقصد destination_account_id جدا و متفاوت باشند.\n- برای شناسه‌ها فقط IDهای context را استفاده کن. اگر نام حساب/دسته/شخص/پروژه/فروشنده را فهمیدی می‌توانی همراه ID فیلد name متناظر هم بدهی.\n- برای سلام و گپ kind=chat و reply طبیعی کوتاه بده.\nmetricهای read: summary, top_expense, search, person, merchant.\nactionهای مجاز: create_transaction, edit_transaction, delete_transaction, create_person, create_project, pay_installment, settle_debt.\ncontext: ${JSON.stringify(context)}\nمتن جدید: ${text}`;
+  const prompt=`تو دستیار مالی شخصی فارسی، صمیمی و دقیق هستی. فقط JSON معتبر مطابق schema برگردان.\nقواعد:\n- سؤال درباره سوابق مالی = kind=read. برای سؤال‌هایی مثل «دیروز چی خوردم؟»، «آخرین خرج‌هام چی بوده؟» یا «برای اسنپ چقدر دادم؟» از metric=search و فیلترهای from/to/category_name/merchant_name/type/query استفاده کن تا کد روی تراکنش‌های واقعی جستجو کند؛ جواب را از خودت نساز.\n- ثبت/ویرایش/حذف/پرداخت = kind=actions و فقط پیشنهاد؛ اجرا بعد از تأیید صریح کاربر است. delete_transaction فقط وقتی کاربر صریحاً حذف تراکنش می‌خواهد و transaction_id باید از recent_transactions باشد.\n- اگر کاربر به «این/همون/قبلی» اشاره کرد از recent_transactions و تاریخچه استفاده کن.\n- اگر اطلاعات اجباری یک اقدام کم است kind=clarify و فقط همان سؤال لازم را بپرس.\n- تاریخ نگفته = امروز ${context.defaults.today}. دیروز = ${context.defaults.yesterday}.\n- اگر حساب نگفته و default account وجود دارد همان ID را بگذار. اگر حساب پیش‌فرض نیست، account_id را خالی بگذار؛ سیستم بعداً اگر فقط یک حساب باشد خودکار پر می‌کند و اگر چند حساب باشد سؤال می‌پرسد.\n- واحد پیش‌فرض وقتی کاربر واحد نگفته ${context.defaults.currency==='TOMAN'?'تومان':'ریال'} است. اگر صریحاً «تومان/تومن» گفت currency=TOMAN و اگر «ریال» گفت currency=IRR. هرگز برای تبدیل واحد صفر اضافه/کم نکن: عدد amount دقیقاً در همان واحدی باشد که کاربر گفته؛ تبدیل را کد انجام می‌دهد. مثال: «100 هزار تومان» => amount=100000,currency=TOMAN و «1.5 میلیون ریال» => amount=1500000,currency=IRR.\n- زمان فعلی تهران ${context.defaults.now_time} است. اگر کاربر زمان انجام تراکنش را گفت، transaction_time را HH:MM:SS بگذار. اگر فقط «ساعت 4:30» گفت، در گفتار روزمره فارسی آن را 16:30 در نظر بگیر مگر «صبح/بامداد» گفته باشد. اگر همراه با «3 روز پیش/سه روز قبل» گفت، همان تاریخ نسبی و همان ساعت را ثبت کن.\n- تاریخ‌های نسبی مثل «امروز»، «دیروز»، «پریروز»، «3 روز پیش»، «سه روز قبل»، «یک هفته پیش» را دقیق به transaction_date_iso تبدیل کن؛ تاریخ امروز از context.defaults.today است.\n- اگر کاربر گفت «با کارت X»، «با حساب X»، «از کارت X» یا نام یک کارت/حساب را آورد، آن را account_name در نظر بگیر و از accounts موجود انتخاب کن.\n- description باید یک چکیده کوتاه و انسانی از خود خرید/دریافت باشد، نه کپی متن کاربر. معمولاً 3 تا 8 کلمه کافی است؛ مبلغ، تاریخ، ساعت و عبارت «با کارت/حساب ...» را داخل description تکرار نکن. مثلاً «سه روز پیش ساعت 4:30 با کارت صادرات دو میلیون برای خرید هدفون خریدم» => description: «خرید هدفون»، account_name: «کارت صادرات».\n- create_transaction type یکی از expense,income,transfer,installment_payment,debt,receivable,refund,adjustment. برای transfer مبدا account_id و مقصد destination_account_id جدا و متفاوت باشند.\n- برای شناسه‌ها فقط IDهای context را استفاده کن. اگر نام حساب/دسته/شخص/پروژه/فروشنده را فهمیدی می‌توانی همراه ID فیلد name متناظر هم بدهی.\n- برای سلام و گپ kind=chat و reply طبیعی کوتاه بده.\nmetricهای read: summary, top_expense, search, person, merchant.\nactionهای مجاز: create_transaction, edit_transaction, delete_transaction, create_person, create_project, pay_installment, settle_debt.\ncontext: ${JSON.stringify(context)}\nمتن جدید: ${text}`;
   const messages=[{role:'system',content:'فقط JSON معتبر مطابق schema بده؛ بدون Markdown.'},...recent,{role:'user',content:prompt}];
   let raw;try{raw=await chat(repo,env,{model,messages,jsonSchema:plannerSchema,maxTokens:950,temperature:0.1});return validatePlan(extractJson(raw));}catch(first){if(first?.message!=='AI_INVALID_JSON')throw first;raw=await chat(repo,env,{model,messages:[{role:'system',content:'فقط یک شیء JSON معتبر بده؛ بدون توضیح.'},...recent,{role:'user',content:prompt}],maxTokens:800,temperature:0});return validatePlan(extractJson(raw));}
 }
@@ -138,25 +138,75 @@ export function explicitMoneyMentions(text='',defaultCurrency=DEFAULT_CURRENCY){
   while((m=wordRe.exec(normalizeText(clean)))){const value=persianNumberWords(m[1]);if(!value)continue;const start=m.index,end=wordRe.lastIndex;if(out.some(x=>start<x.end&&end>x.index))continue;const before=normalizeText(clean).slice(Math.max(0,start-24),start),fee=/کارمزد/.test(before);out.push({amount:value,currency:/تومان|تومن/.test(m[2])?'TOMAN':'IRR',fee,index:start,end,explicit_unit:true});}
   return out.sort((a,b)=>a.index-b.index).map(({end,...x})=>x);
 }
+export function inferNaturalTransactionDate(text='',now=new Date()){
+  const clean=normalizeText(text);
+  let days=null;
+  if(/\bپریروز\b/.test(clean))days=2;
+  else if(/\bدیروز\b/.test(clean))days=1;
+  else if(/\bامروز\b/.test(clean))days=0;
+  const m=clean.match(/(?:^|\s)(\d+|یک|یه|دو|سه|چهار|پنج|شش|هفت|هشت|نه|ده|یازده|دوازده|سی)\s*(?:روز|روزِ)\s*(?:پیش|قبل|گذشته)\b/);
+  if(m)days=/^\d+$/.test(m[1])?Number(m[1]):persianNumberWords(m[1]);
+  if(days===null){
+    const wm=clean.match(/(?:^|\s)(یک|یه|دو|سه|چهار|پنج|شش|هفت|هشت|نه|ده|\d+)\s*هفته\s*(?:پیش|قبل|گذشته)\b/);
+    if(wm){const n=/^\d+$/.test(wm[1])?Number(wm[1]):persianNumberWords(wm[1]);if(Number.isFinite(n))days=n*7;}
+  }
+  if(days===null){
+    const pm=clean.match(/(?:^|\s)(یک|یه|دو|سه|چهار|پنج|شش|هفت|هشت|نه|ده|\d+)?\s*ماه\s*(?:پیش|قبل|گذشته)\b/);
+    if(pm){const n=pm[1]?( /^\d+$/.test(pm[1])?Number(pm[1]):persianNumberWords(pm[1]) ):1;if(Number.isFinite(n))days=n*30;}
+  }
+  if(days===null||!Number.isInteger(days)||days<0||days>3650)return'';
+  const today=parseDateInput('امروز'),base=new Date(`${today}T12:00:00Z`);if(Number.isNaN(base.getTime()))return today;
+  base.setUTCDate(base.getUTCDate()-days);return base.toISOString().slice(0,10);
+}
+
 export function inferNaturalTransactionTime(text='',now=new Date()){
-  const clean=digitsEn(String(text||'')).replace(/٫/g,':'),current=tehranTime(now).split(':').map(Number),currentMinutes=current[0]*60+current[1];let m=clean.match(/ساعت\s*(\d{1,2})(?:[:.]([0-5]?\d))?(?:[:.]([0-5]?\d))?\s*(صبح|بامداد|ظهر|عصر|بعدازظهر|شب)?/);
+  const clean=digitsEn(String(text||'')).replace(/٫/g,':'),current=tehranTime(now).split(':').map(Number),currentMinutes=current[0]*60+current[1];
+  let m=clean.match(/ساعت\s*(\d{1,2})(?:[:.]([0-5]?\d))?(?:[:.]([0-5]?\d))?\s*(صبح|بامداد|ظهر|عصر|بعدازظهر|شب)?/);
   if(!m)m=clean.match(/(?:^|\s)(\d{1,2}):([0-5]\d)(?::([0-5]\d))?(?:\s|$)/);if(!m)return'';
   let h=Number(m[1]),mi=Number(m[2]||0),se=Number(m[3]||0),part=m[4]||'';if(h>23||mi>59||se>59)return'';
   if(part){if(/عصر|بعدازظهر|شب/.test(part)&&h<12)h+=12;else if(part==='ظهر'&&h<12)h=h===12?12:h+12;else if(/صبح|بامداد/.test(part)&&h===12)h=0;}
-  else if(h>=1&&h<=12){const candidates=[h===12?0:h,h===12?12:h+12],past=candidates.filter(x=>x*60+mi<=currentMinutes);h=past.length?past[past.length-1]:candidates[0];}
+  else if(h>=1&&h<=12){
+    const pastDate=inferNaturalTransactionDate(text,now)!==parseDateInput('امروز');
+    if(pastDate&&h<=6)h+=12;
+    else {const candidates=[h===12?0:h,h===12?12:h+12],past=candidates.filter(x=>x*60+mi<=currentMinutes);h=past.length?past[past.length-1]:candidates[0];}
+  }
   return `${String(h).padStart(2,'0')}:${String(mi).padStart(2,'0')}:${String(se).padStart(2,'0')}`;
 }
+function inferAccountMention(repo,text){return repo.list('Accounts',{limit:500,filter:a=>!bool(a.archived)&&!bool(a.is_deleted)}).then(accounts=>{const q=normalizeText(text);const candidates=accounts.map(a=>({row:a,name:normalizeText(a.name||'')})).filter(x=>x.name.length>=3&&q.includes(x.name));candidates.sort((a,b)=>b.name.length-a.name.length);if(candidates[0])return candidates[0].row;const m=q.match(/(?:با|از|در)\s+(?:کارت|حساب)\s+([^،,؛;\n]+?)(?=\s+(?:خریدم|خرید|پرداخت|دادم|گرفتم|برای|به|از|در)\b|$)/);if(m){const phrase=normalizeText(m[1]);const hit=accounts.find(a=>{const n=normalizeText(a.name||'');return n&&((n.includes(phrase)&&phrase.length>=3)||(phrase.includes(n)&&n.length>=3));});if(hit)return hit;}return null;});}
+function compactDescription(text=''){
+  let s=String(text||'').trim();if(!s)return'';
+  const mentions=explicitMoneyMentions(s,DEFAULT_CURRENCY);for(const m of mentions.sort((a,b)=>b.index-a.index))s=s.slice(0,m.index)+s.slice(m.end);
+  s=s.replace(/(?:پریروز|دیروز|امروز|\d+\s*(?:روز|هفته|ماه)\s*(?:پیش|قبل|گذشته)|(?:یک|یه|دو|سه|چهار|پنج|شش|هفت|هشت|نه|ده)\s*(?:روز|هفته|ماه)\s*(?:پیش|قبل|گذشته))/gi,' ');
+  s=s.replace(/ساعت\s*\d{1,2}(?:[:.]\d{1,2})?(?:[:.]\d{1,2})?\s*(?:صبح|بامداد|ظهر|عصر|بعدازظهر|شب)?/gi,' ');
+  s=s.replace(/(?:با|از)\s+(?:کارت|حساب)\s+[^،,؛;\n]+?(?=\s+(?:خریدم|خرید|پرداخت|دادم|گرفتم|برای|به|از|در)\b|$)/gi,' ');
+  const wasPurchase=/(خریدم|خرید کردم|خرید)/i.test(text),wasPayment=/(پرداخت کردم|پرداخت)/i.test(text),wasTransfer=/(واریز کردم|واریز شد|واریز)/i.test(text);
+  s=s.replace(/\b(?:من|خریدم|خرید کردم|خرید|پرداخت کردم|پرداخت|خرج کردم|هزینه کردم|هزینه|دادم|گرفتم|واریز کردم|واریز شد|واریز|شد)\b/gi,' ');
+  s=s.replace(/\s+/g,' ').replace(/^[،,؛;:\-\s]+|[،,؛;:\-\s]+$/g,'').trim();
+  if(!s)return'تراکنش';
+  if(wasPurchase)s=`خرید ${s}`;else if(wasPayment)s=`پرداخت ${s}`;else if(wasTransfer)s=`واریز ${s}`;
+  if(s.length>70)s=s.slice(0,70).replace(/\s+\S*$/,'').trim();
+  return s;
+}
 function convertUnit(value,from,to){if(from===to)return value;return from==='TOMAN'&&to==='IRR'?value*10:value/10;}
-function applyUserMoneyAndTime(actions,text,defaultCurrency){
-  const list=(actions||[]).map(a=>({action:a.action,data:{...(a.data||{})}})),mentions=explicitMoneyMentions(text,defaultCurrency),main=mentions.filter(x=>!x.fee),fees=mentions.filter(x=>x.fee),time=inferNaturalTransactionTime(text);let mi=0,fi=0;
-  for(const a of list){if(a.action!=='create_transaction'&&a.action!=='pay_installment'&&a.action!=='settle_debt')continue;const x=a.data;if(main[mi]){x.amount=main[mi].amount;x.currency=main[mi].currency;mi++;}else x.currency=x.currency||defaultCurrency;if(fees[fi]){x.fee_amount=Math.round(convertUnit(fees[fi].amount,fees[fi].currency,x.currency||defaultCurrency));fi++;}if(time&&!x.transaction_time)x.transaction_time=time;}
+async function applyUserMoneyAndTime(repo,actions,text,defaultCurrency){
+  const list=(actions||[]).map(a=>({action:a.action,data:{...(a.data||{})}})),mentions=explicitMoneyMentions(text,defaultCurrency),main=mentions.filter(x=>!x.fee),fees=mentions.filter(x=>x.fee),time=inferNaturalTransactionTime(text),date=inferNaturalTransactionDate(text),account=await inferAccountMention(repo,text);let mi=0,fi=0;
+  for(const a of list){
+    if(a.action!=='create_transaction'&&a.action!=='pay_installment'&&a.action!=='settle_debt')continue;
+    const x=a.data;
+    if(main[mi]){x.amount=main[mi].amount;x.currency=main[mi].currency;mi++;}else x.currency=x.currency||defaultCurrency;
+    if(fees[fi]){x.fee_amount=Math.round(convertUnit(fees[fi].amount,fees[fi].currency,x.currency||defaultCurrency));fi++;}
+    if(date&&!x.transaction_date&&!x.transaction_date_iso)x.transaction_date_iso=date;
+    if(time&&!x.transaction_time)x.transaction_time=time;
+    if(account&&!x.account_id&&['expense','income','transfer','installment_payment','receivable','refund'].includes(x.type||'expense')){x.account_id=account.account_id;x.account_name=account.name||'';}
+    if(a.action==='create_transaction'&&(!x.description||String(x.description).trim()===String(text).trim()||String(x.description).length>90))x.description=compactDescription(text);
+  }
   return list;
 }
 async function namedId(repo,sheet,data,idKey,nameKey){if(data[idKey])return String(data[idKey]);if(!data[nameKey])return'';const r=await resolveNamed(repo,sheet,data[nameKey]);if(r.ambiguous)return{ambiguous:true,options:r.options};return r.id||'';}
-async function normalizeAction(repo,action){
+async function normalizeAction(repo,action,sourceText=''){
   const x={...(action.data||{})},currency=currencyCode(await repo.setting('default_currency',DEFAULT_CURRENCY));
   if(action.action==='create_transaction'){
-    x.type=String(x.type||'expense');x.currency=x.currency||currency;if(!x.transaction_date&&!x.transaction_date_iso)x.transaction_date=parseDateInput('امروز');
+    x.type=String(x.type||'expense');x.currency=x.currency||currency;const inferredDate=inferNaturalTransactionDate(sourceText);const inferredTime=inferNaturalTransactionTime(sourceText);if(inferredDate&&!x.transaction_date&&!x.transaction_date_iso)x.transaction_date_iso=inferredDate;if(inferredTime&&!x.transaction_time)x.transaction_time=inferredTime;if(!x.transaction_date&&!x.transaction_date_iso)x.transaction_date=parseDateInput('امروز');if(sourceText&&(!x.description||String(x.description).trim()===String(sourceText).trim()||String(x.description).length>90))x.description=compactDescription(sourceText);
     for(const [sheet,idKey,nameKey] of [['Accounts','account_id','account_name'],['Accounts','destination_account_id','destination_account_name'],['Categories','category_id','category_name'],['People','person_id','person_name'],['Projects','project_id','project_name'],['Merchants','merchant_id','merchant_name']]){const id=await namedId(repo,sheet,x,idKey,nameKey);if(isPlainObject(id)&&id.ambiguous)return{clarify:`${x[nameKey]} چند مورد دارد؛ دقیق‌تر انتخاب کن.`,options:id.options.map(o=>o.name)};if(id)x[idKey]=id;}
     if(CASH_TYPES.has(x.type)&&!x.account_id){const accounts=await repo.list('Accounts',{limit:500,filter:a=>!bool(a.archived)&&!bool(a.is_deleted)}),def=String(await repo.setting('default_account','')||''),valid=accounts.find(a=>String(a.account_id)===def),favorites=accounts.filter(a=>bool(a.favorite));if(valid)x.account_id=valid.account_id;else if(favorites.length===1)x.account_id=favorites[0].account_id;else if(accounts.length===1)x.account_id=accounts[0].account_id;else return{clarify:'این تراکنش از کدام حساب ثبت شود؟',options:accounts.slice(0,8).map(a=>a.name)};}
     if(x.type==='transfer'){if(!x.destination_account_id){const accounts=await repo.list('Accounts',{limit:500,filter:a=>!bool(a.archived)&&!bool(a.is_deleted)&&String(a.account_id)!==String(x.account_id)});if(accounts.length===1)x.destination_account_id=accounts[0].account_id;else return{clarify:'انتقال به کدام حساب مقصد است؟',options:accounts.slice(0,8).map(a=>a.name)};}if(String(x.account_id)===String(x.destination_account_id))return{clarify:'حساب مبدا و مقصد انتقال نمی‌توانند یکی باشند.',options:[]};}
@@ -171,7 +221,7 @@ async function normalizeAction(repo,action){
   else if(!ALLOWED_ACTIONS.has(action.action))throw new Error('AI_INVALID_ACTION');
   return{action:{action:action.action,data:x}};
 }
-export async function normalizeAiActions(repo,actions=[],sourceText=''){const currency=currencyCode(await repo.setting('default_currency',DEFAULT_CURRENCY)),prepared=applyUserMoneyAndTime(actions,sourceText,currency),out=[];for(const item of prepared){const n=await normalizeAction(repo,item);if(n.clarify)return n;out.push(n.action);}return{actions:out};}
+export async function normalizeAiActions(repo,actions=[],sourceText=''){const currency=currencyCode(await repo.setting('default_currency',DEFAULT_CURRENCY)),prepared=await applyUserMoneyAndTime(repo,actions,sourceText,currency),out=[];for(const item of prepared){const n=await normalizeAction(repo,item,sourceText);if(n.clarify)return n;out.push(n.action);}return{actions:out};}
 
 const FOOD_TERMS=['غذا','خوراک','ناهار','شام','صبحانه','رستوران','کافه','فست فود','فستفود','پیتزا','ساندویچ','برگر','قهوه','چای','سوپرمارکت','سوپر مارکت','تنقلات','میان وعده'];
 function quickGreeting(text=''){
@@ -189,9 +239,9 @@ async function fastSimpleAction(repo,env,text){
   const expense=/(خریدم|خرید کردم|خرید|خرج کردم|هزینه کردم|ناهار|شام|صبحانه|کافه|رستوران|قبض|کرایه|اسنپ|تاکسی|سوپرمارکت|سوپر مارکت)/.test(q),income=/(حقوق|درآمد|دستمزد|واریزی|واریز شد|فروختم|فروش کردم|دریافتی)/.test(q);
   if(expense===income)return null;
   const currency=currencyCode(await repo.setting('default_currency',DEFAULT_CURRENCY)),money=explicitMoneyMentions(text,currency).find(x=>!x.fee);if(!money)return null;
-  let date=parseDateInput('امروز');if(q.includes('دیروز'))date=parseDateInput('دیروز');
-  const time=inferNaturalTransactionTime(text)||tehranTime(),description=String(text||'').trim().slice(0,220);
-  return saveActionProposal(repo,env,text,[{action:'create_transaction',data:{type:income?'income':'expense',amount:money.amount,currency:money.currency,transaction_date:date,transaction_time:time,description}}]);
+  const date=inferNaturalTransactionDate(text)||parseDateInput('امروز');
+  const time=inferNaturalTransactionTime(text)||tehranTime(),description=compactDescription(text);
+  const account=await inferAccountMention(repo,text);return saveActionProposal(repo,env,text,[{action:'create_transaction',data:{type:income?'income':'expense',amount:money.amount,currency:money.currency,transaction_date_iso:date,transaction_time:time,description,account_id:account?.account_id||'',account_name:account?.name||''}}]);
 }
 async function fastHistoryRead(repo,text){
   const q=normalizeText(text),currency=currencyCode(await repo.setting('default_currency',DEFAULT_CURRENCY)),food=/(چی|چه).*(خوردم|خوردیم|غذا|ناهار|شام|صبحانه)|(خوردم|خوردیم).*(چی|چه)/.test(q),last=/(آخرین|اخری|جدیدترین).*(تراکنش|خرج|هزینه|خرید|درآمد)|(تراکنش|خرج|هزینه|خرید|درآمد).*(آخرین|اخری|جدیدترین)/.test(q);
