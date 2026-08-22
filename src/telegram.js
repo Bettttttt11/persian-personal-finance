@@ -80,6 +80,33 @@ async function choosePeople(repo,env,chatId,messageId,context='core'){const rows
 async function chooseRefundOrigin(repo,env,chatId,messageId){const rows=await repo.list('Transactions',{limit:1000,includeDeleted:false,filter:x=>['expense','installment_payment','receivable'].includes(x.type)&&String(x.status||'confirmed')==='confirmed',sort:(a,b)=>String(b.transaction_date_iso).localeCompare(String(a.transaction_date_iso))});const buttons=rows.slice(0,10).map(t=>[btn(`${t.description||TYPES[t.type]} — ${moneyFa(t.amount)}`,`w:refund:${t.transaction_id}`)]);buttons.push([btn('❌ لغو','w:cancel')]);return panel(env,chatId,messageId,'↩️ <b>تراکنش اصلی بازپرداخت را انتخاب کنید</b>',kb(buttons));}
 async function chooseInstallmentPlan(repo,env,chatId,messageId,url){const rows=await repo.list('Installments',{limit:500,filter:x=>x.status!=='completed'&&!bool(x.is_deleted)&&!bool(x.archived)}),buttons=rows.slice(0,12).map(p=>[btn(`${p.title} — ${moneyFa(p.default_installment_amount)}`,`w:inst:${p.installment_id}`)]);buttons.push([web('مدیریت اقساط',webAppUrl(env,url))],[btn('❌ لغو','w:cancel')]);return panel(env,chatId,messageId,'💳 <b>کدام قسط؟</b>',kb(buttons));}
 async function askAmount(env,chatId,messageId,defaultAmount=0,currency=DEFAULT_CURRENCY){const rows=[],unit=currencyCode(currency);if(defaultAmount>0)rows.push([btn(`مبلغ پیش‌فرض: ${moneyFa(defaultAmount,unit)}`,'w:amount:default')]);rows.push([btn('❌ لغو','w:cancel')]);return panel(env,chatId,messageId,`💰 مبلغ را به ${unit==='TOMAN'?'تومان':'ریال'} بفرستید.`,kb(rows));}
+async function manualDateTimeSettings(repo){
+  return {
+    date:await repo.setting('manual_transaction_date',false)===true,
+    time:await repo.setting('manual_transaction_time',false)===true
+  };
+}
+async function continueAfterDateTime(repo,env,chatId,messageId,flow){
+  const s=flow.state,manual=await manualDateTimeSettings(repo);
+  if(!s.transaction_date_iso)s.transaction_date_iso=tehranToday();
+  if(!s.transaction_time)s.transaction_time=tehranTime();
+  await updateDraft(repo,flow.draft,s);
+  if(manual.date&&!s._date_done){
+    s.awaiting='date';
+    await updateDraft(repo,flow.draft,s);
+    return askDate(env,chatId,messageId);
+  }
+  if(manual.time&&!s._time_done){
+    s.awaiting='time';
+    await updateDraft(repo,flow.draft,s);
+    return askTime(env,chatId,messageId);
+  }
+  s.awaiting='';
+  delete s._date_done;
+  delete s._time_done;
+  await updateDraft(repo,flow.draft,s);
+  return panel(env,chatId,messageId,formatTxPreview(s),previewKb());
+}
 async function askDate(env,chatId,messageId){return panel(env,chatId,messageId,'📅 <b>تاریخ تراکنش</b>',kb([[btn('امروز','w:date:today'),btn('دیروز','w:date:yesterday')],[btn('تاریخ دستی','w:date:manual')],[btn('❌ لغو','w:cancel')]]));}
 async function askTime(env,chatId,messageId){return panel(env,chatId,messageId,'🕐 <b>ساعت تراکنش</b>',kb([[btn('الان','w:time:now')],[btn('ساعت دستی','w:time:manual')],[btn('❌ لغو','w:cancel')]]));}
 async function askDescription(env,chatId,messageId){return panel(env,chatId,messageId,'✏️ توضیح را بفرستید یا رد کنید.',kb([[btn('رد کردن','w:desc:skip')],[btn('❌ لغو','w:cancel')]]));}
@@ -107,12 +134,39 @@ async function hydrateTemplate(repo,state,template){
   if(state.tag_ids.length){const tags=await repo.list('Tags',{limit:500});state.tag_names=tags.filter(x=>state.tag_ids.includes(x.tag_id)).map(x=>x.name);}return state;
 }
 async function afterAmount(repo,env,chatId,messageId,url,flow){const s=flow.state;if(s.installment_id)return afterInstallmentAmount(repo,env,chatId,messageId,url,flow);if(s.type==='refund')return chooseRefundOrigin(repo,env,chatId,messageId);if(['debt','receivable'].includes(s.type)&&!s.person_id)return choosePeople(repo,env,chatId,messageId,'core');return chooseAccounts(repo,env,chatId,messageId,url,{allowNone:s.type==='debt'});}
-async function afterInstallmentAmount(repo,env,chatId,messageId,url,flow){const s=flow.state;if(s.account_id){s.transaction_date_iso=s.transaction_date_iso||parseDateInput('امروز');await updateDraft(repo,flow.draft,s);return panel(env,chatId,messageId,formatTxPreview(s),previewKb());}return chooseAccounts(repo,env,chatId,messageId,url);}
+async function afterInstallmentAmount(repo,env,chatId,messageId,url,flow){
+  const s=flow.state;
+  if(s.account_id)return continueAfterDateTime(repo,env,chatId,messageId,flow);
+  return chooseAccounts(repo,env,chatId,messageId,url);
+}
 async function afterPerson(repo,env,chatId,messageId,url,flow,context='core'){const s=flow.state;if(context==='advanced'){if(s.type==='expense')return panel(env,chatId,messageId,'👤 این مبلغ را از این شخص پس می‌گیرید؟',kb([[btn('بله، طلب است','w:personreturn:yes'),btn('خیر، خرج شخصی','w:personreturn:no')],[btn('⬅️ بازگشت','w:more')]]));return showAdvanced(repo,env,chatId,messageId,s);}return chooseAccounts(repo,env,chatId,messageId,url,{allowNone:s.type==='debt'});}
-async function afterAccount(repo,env,chatId,messageId,url,flow){const s=flow.state;if(s.type==='transfer')return chooseDestination(repo,env,chatId,messageId,s.account_id);if(s.installment_id){s.transaction_date_iso=s.transaction_date_iso||parseDateInput('امروز');await updateDraft(repo,flow.draft,s);return panel(env,chatId,messageId,formatTxPreview(s),previewKb());}return chooseCategories(repo,env,chatId,messageId);}
-async function afterCategory(repo,env,chatId,messageId,flow){return askDate(env,chatId,messageId);}
-async function afterDate(repo,env,chatId,messageId,flow){flow.state.awaiting='time';await updateDraft(repo,flow.draft,flow.state);return askTime(env,chatId,messageId);}
-async function afterTime(repo,env,chatId,messageId,flow){flow.state.awaiting='description';await updateDraft(repo,flow.draft,flow.state);return askDescription(env,chatId,messageId);}
+async function afterAccount(repo,env,chatId,messageId,url,flow){
+  const s=flow.state;
+  if(s.type==='transfer')return chooseDestination(repo,env,chatId,messageId,s.account_id);
+  if(s.installment_id)return continueAfterDateTime(repo,env,chatId,messageId,flow);
+  if(s.debt_id)return continueAfterDateTime(repo,env,chatId,messageId,flow);
+  return chooseCategories(repo,env,chatId,messageId);
+}
+async function afterCategory(repo,env,chatId,messageId,flow){
+  const manual=await manualDateTimeSettings(repo),s=flow.state;
+  if(!manual.date)s.transaction_date_iso=tehranToday();
+  if(!manual.time)s.transaction_time=tehranTime();
+  await updateDraft(repo,flow.draft,s);
+  if(manual.date){s.awaiting='date';await updateDraft(repo,flow.draft,s);return askDate(env,chatId,messageId);}
+  if(manual.time){s.awaiting='time';await updateDraft(repo,flow.draft,s);return askTime(env,chatId,messageId);}
+  s.awaiting='description';await updateDraft(repo,flow.draft,s);return askDescription(env,chatId,messageId);
+}
+async function afterDate(repo,env,chatId,messageId,flow){
+  const manual=await manualDateTimeSettings(repo),s=flow.state;
+  s._date_done=true;
+  if(!manual.time)s.transaction_time=tehranTime();
+  await updateDraft(repo,flow.draft,s);
+  if(manual.time){s.awaiting='time';await updateDraft(repo,flow.draft,s);return askTime(env,chatId,messageId);}
+  s.awaiting='description';delete s._date_done;await updateDraft(repo,flow.draft,s);return askDescription(env,chatId,messageId);
+}
+async function afterTime(repo,env,chatId,messageId,flow){
+  flow.state._time_done=true;flow.state.awaiting='description';delete flow.state._time_done;await updateDraft(repo,flow.draft,flow.state);return askDescription(env,chatId,messageId);
+}
 
 function quickParse(text){const value=digitsEn(text),match=value.match(/(?:^|\s)(\d[\d,٬،_]*)(?:\s|$)/);if(!match)return null;let amount;try{amount=parseMoney(match[1]);}catch{return null;}if(amount<=0)return null;const description=value.replace(match[1],'').replace(/\s+/g,' ').trim();return{amount,description};}
 async function quickEntry(repo,env,chatId,text,url){const parsed=quickParse(text);if(!parsed)return false;const finance=new FinanceService(repo,'owner'),defaultAccount=await repo.setting('default_account',''),accounts=await namedRows(repo,'Accounts');let account=accounts.find(x=>x.account_id===defaultAccount);if(!account&&accounts.length===1)account=accounts[0];let state=await finance.applyRules({type:'expense',amount:parsed.amount,description:parsed.description,transaction_date_iso:parseDateInput('امروز'),account_id:account?.account_id||'',fee_amount:0,tag_ids:[],tag_names:[],pending_receipts:[]});
@@ -182,7 +236,7 @@ async function handleText(msg,repo,env,url){
     if(state.action==='pin_set'){try{await setPin(repo,env,text);await repo.updateById('Drafts',input.draft.draft_id,{status:'done'},{audit:false});return telegramCall(env,'sendMessage',{chat_id:chatId,text:'✅ رمز جدید ذخیره و فعال شد. پیام رمز هم حذف شد.'});}catch{return telegramCall(env,'sendMessage',{chat_id:chatId,text:'رمز باید بین ۴ تا ۳۲ کاراکتر باشد. دوباره ارسال کنید.'});}}
     if(state.action==='category_new'){
       const category=await repo.insert('Categories',{category_id:uuid(),name:text,icon:'',color:'',type:'expense',favorite:false,archived:false,created_at:nowIso(),updated_at:nowIso(),schema_version:SCHEMA_VERSION});await repo.updateById('Drafts',input.draft.draft_id,{status:'done'},{audit:false});
-      if(state.return==='wizard'){const w=await loadState(repo,'transaction_wizard');if(w){w.state.category_id=category.category_id;w.state.category_name=category.name;await updateDraft(repo,w.draft,w.state);return askDate(env,chatId,w.state.message_id);}}return categoryMenu(repo,env,chatId,state.message_id);
+      if(state.return==='wizard'){const w=await loadState(repo,'transaction_wizard');if(w){w.state.category_id=category.category_id;w.state.category_name=category.name;await updateDraft(repo,w.draft,w.state);return afterCategory(repo,env,chatId,w.state.message_id,w);}}return categoryMenu(repo,env,chatId,state.message_id);
     }
     if(state.action==='category_rename'){await repo.updateById('Categories',state.category_id,{name:text});await repo.updateById('Drafts',input.draft.draft_id,{status:'done'},{audit:false});return categoryMenu(repo,env,chatId,state.message_id);}
     if(state.action==='ai_choice'){const choice=state.options?.[Number(state.index)]||text;await repo.updateById('Drafts',input.draft.draft_id,{status:'done'},{audit:false});const result=await handleAiText(repo,env,`${state.original_text}\nانتخاب من: ${choice}`);return showAiResult(repo,env,chatId,state.message_id,result,url);}
@@ -239,8 +293,27 @@ async function handleCallback(cb,repo,env,url){
   if(data.startsWith('airead:p:')){const s=await personSummary(repo,data.slice(9));return panel(env,chatId,mid,`🤖 طلب باز: ${moneyFa(s.receivable)}\nبدهی باز: ${moneyFa(s.debt)}\nمانده: ${moneyFa(s.balance)}`,kb([[btn('خروج از دستیار','ai:exit')]]));}
   if(data.startsWith('airead:m:')){const tx=await queryTransactions(repo,{merchant_id:data.slice(9)}),s=summarize(tx);return panel(env,chatId,mid,`🤖 خرج خالص این فروشنده: ${moneyFa(s.net_expense)}\nتعداد تراکنش: ${tx.length.toLocaleString('fa-IR')}`,kb([[btn('خروج از دستیار','ai:exit')]]));}
   if(data.startsWith('aichoice:')){const idx=Number(data.slice(9)),choice=await loadState(repo,'ai_clarify');if(!choice)return;const selected=choice.state.options?.[idx];await repo.updateById('Drafts',choice.draft.draft_id,{status:'done'},{audit:false});const result=await handleAiText(repo,env,`${choice.state.original_text}\nانتخاب من: ${selected}`);return showAiResult(repo,env,chatId,mid,result,url,choice.state.original_text);}
-  if(data==='m:settings')return panel(env,chatId,mid,'⚙️ <b>تنظیمات</b>',kb([[btn('🏷 دسته‌بندی‌ها','cat:list'),web('مدیریت کامل',webAppUrl(env,url))],[btn('🔐 رمز ورود','m:pin'),btn('🩺 سلامت سیستم','m:health')],[btn('🔒 قفل','m:lock')],[btn('⬅️ منو','m:home')]]));
-  if(data==='m:pin'){const st=await pinStatus(repo,env);return panel(env,chatId,mid,`🔐 <b>رمز ورود</b>\nوضعیت: ${st.enabled?'فعال ✅':'غیرفعال ◻️'}\n\nرمز در Google Sheets به‌صورت هش ذخیره می‌شود و متن اصلی نگهداری نمی‌شود.`,kb([[btn(st.enabled?'🔁 تغییر رمز':'➕ تعیین و فعال‌سازی','pin:set')],...(st.enabled?[[btn('🚫 غیرفعال کردن رمز','pin:disable')]]:[]),[btn('⬅️ تنظیمات','m:settings')]]));}
+  if(data==='m:settings'){
+  const md=await manualDateTimeSettings(repo),ps=await pinStatus(repo,env);
+  return panel(env,chatId,mid,'⚙️ <b>تنظیمات</b>\n\nتاریخ و ساعت تراکنش به‌صورت پیش‌فرض همین لحظه ثبت می‌شوند. اگر گزینه‌های زیر را روشن کنید، هنگام ثبت امکان انتخاب دستی هم نمایش داده می‌شود.',kb([
+    [btn('🏷 دسته‌بندی‌ها','cat:list'),web('مدیریت کامل',webAppUrl(env,url))],
+    [btn(`📅 تاریخ دستی: ${md.date?'روشن ✅':'خاموش ◻️'}`,'m:toggle_date'),btn(`🕐 ساعت دستی: ${md.time?'روشن ✅':'خاموش ◻️'}`,'m:toggle_time')],
+    [btn(`🔐 رمز ورود: ${ps.enabled?'فعال ✅':'غیرفعال ◻️'}`,'m:pin'),btn('🩺 سلامت سیستم','m:health')],
+    [btn('🔒 قفل','m:lock')],
+    [btn('⬅️ منو','m:home')]
+  ]));
+}
+  if(data==='m:toggle_date'){
+  const current=await repo.setting('manual_transaction_date',false);
+  await repo.setSetting('manual_transaction_date',current!==true);
+  return panel(env,chatId,mid,`📅 پرسیدن تاریخ دستی ${current===true?'خاموش شد':'روشن شد'}.`,kb([[btn('⬅️ تنظیمات','m:settings')]]));
+}
+if(data==='m:toggle_time'){
+  const current=await repo.setting('manual_transaction_time',false);
+  await repo.setSetting('manual_transaction_time',current!==true);
+  return panel(env,chatId,mid,`🕐 پرسیدن ساعت دستی ${current===true?'خاموش شد':'روشن شد'}.`,kb([[btn('⬅️ تنظیمات','m:settings')]]));
+}
+if(data==='m:pin'){const st=await pinStatus(repo,env);return panel(env,chatId,mid,`🔐 <b>رمز ورود</b>\nوضعیت: ${st.enabled?'فعال ✅':'غیرفعال ◻️'}\n\nرمز در Google Sheets به‌صورت هش ذخیره می‌شود و متن اصلی نگهداری نمی‌شود.`,kb([[btn(st.enabled?'🔁 تغییر رمز':'➕ تعیین و فعال‌سازی','pin:set')],...(st.enabled?[[btn('🚫 غیرفعال کردن رمز','pin:disable')]]:[]),[btn('⬅️ تنظیمات','m:settings')]]));}
   if(data==='pin:set'){await closeDraft(repo,'bot_input','replaced');await createDraft(repo,'bot_input',{action:'pin_set',message_id:mid},1);return panel(env,chatId,mid,'رمز جدید را بفرستید (۴ تا ۳۲ کاراکتر). پیام بعد از دریافت حذف می‌شود.',kb([[btn('⬅️ تنظیمات','m:settings')]]));}
   if(data==='pin:disable'){await disablePin(repo,env);return panel(env,chatId,mid,'✅ رمز ورود غیرفعال شد. از این به بعد ربات و Mini App برای مالک بدون رمز وارد می‌شوند.',kb([[btn('⬅️ تنظیمات','m:settings')]]));}
   if(data==='m:health'){const h=await setupHealth(repo,env);return panel(env,chatId,mid,healthText(h),kb([[btn('⬅️ تنظیمات','m:settings')]]));}
@@ -257,9 +330,9 @@ async function handleCallback(cb,repo,env,url){
   if(data.startsWith('w:type:')){const flow=await loadState(repo,'transaction_wizard');if(!flow)return;flow.state.type=data.slice(7);if(flow.state.type==='installment_payment'){flow.state.awaiting='';await updateDraft(repo,flow.draft,flow.state);return chooseInstallmentPlan(repo,env,chatId,mid,url);}flow.state.awaiting='amount';await updateDraft(repo,flow.draft,flow.state);return askAmount(env,chatId,mid,0,flow?.state?.currency||DEFAULT_CURRENCY);}
   if(data.startsWith('w:inst:')){const flow=await loadState(repo,'transaction_wizard'),plan=await repo.getById('Installments',data.slice(7));if(!flow||!plan)return;const cur=flow.state.currency||await preferredCurrency(repo);Object.assign(flow.state,{type:'installment_payment',currency:cur,installment_id:plan.installment_id,installment_title:plan.title,default_installment_amount:fromRial(Number(plan.default_installment_amount||0),cur),account_id:plan.account_id||'',person_id:plan.person_id||'',project_id:plan.project_id||'',description:plan.title,awaiting:'installment_amount'});if(plan.account_id){const a=await repo.getById('Accounts',plan.account_id);flow.state.account_name=a?.name||'';}if(plan.person_id){const p=await repo.getById('People',plan.person_id);flow.state.person_name=p?.name||'';}if(plan.project_id){const p=await repo.getById('Projects',plan.project_id);flow.state.project_name=p?.name||'';}await updateDraft(repo,flow.draft,flow.state);return askAmount(env,chatId,mid,flow.state.default_installment_amount,flow.state.currency||DEFAULT_CURRENCY);}
   if(data==='w:amount:default'){const flow=await loadState(repo,'transaction_wizard');if(!flow)return;flow.state.amount=Number(flow.state.default_installment_amount||0);flow.state.awaiting='';await updateDraft(repo,flow.draft,flow.state);return afterInstallmentAmount(repo,env,chatId,mid,url,flow);}
-  if(data.startsWith('w:refund:')){const flow=await loadState(repo,'transaction_wizard'),tx=await repo.getById('Transactions',data.slice(9));if(!flow||!tx)return;Object.assign(flow.state,{parent_transaction_id:tx.transaction_id,account_id:tx.account_id,category_id:tx.category_id,person_id:tx.person_id,project_id:tx.project_id,merchant_id:tx.merchant_id,description:flow.state.description||`بازپرداخت ${tx.description||''}`.trim()});for(const [sheet,key,nameKey] of [['Accounts','account_id','account_name'],['Categories','category_id','category_name'],['People','person_id','person_name'],['Projects','project_id','project_name'],['Merchants','merchant_id','merchant_name']])if(flow.state[key]){const r=await repo.getById(sheet,flow.state[key]);flow.state[nameKey]=r?.name||r?.title||'';}await updateDraft(repo,flow.draft,flow.state);return askDate(env,chatId,mid);}
+  if(data.startsWith('w:refund:')){const flow=await loadState(repo,'transaction_wizard'),tx=await repo.getById('Transactions',data.slice(9));if(!flow||!tx)return;Object.assign(flow.state,{parent_transaction_id:tx.transaction_id,account_id:tx.account_id,category_id:tx.category_id,person_id:tx.person_id,project_id:tx.project_id,merchant_id:tx.merchant_id,description:flow.state.description||`بازپرداخت ${tx.description||''}`.trim()});for(const [sheet,key,nameKey] of [['Accounts','account_id','account_name'],['Categories','category_id','category_name'],['People','person_id','person_name'],['Projects','project_id','project_name'],['Merchants','merchant_id','merchant_name']])if(flow.state[key]){const r=await repo.getById(sheet,flow.state[key]);flow.state[nameKey]=r?.name||r?.title||'';}await updateDraft(repo,flow.draft,flow.state);return continueAfterDateTime(repo,env,chatId,mid,flow);}
   if(data.startsWith('w:acct:')){const flow=await loadState(repo,'transaction_wizard');if(!flow)return;const id=data.slice(7);if(id==='none'){if(flow.state.type!=='debt')return;flow.state.account_id='';flow.state.account_name='';}else{const a=await repo.getById('Accounts',id);flow.state.account_id=id;flow.state.account_name=a?.name||'';}await updateDraft(repo,flow.draft,flow.state);if(flow.state.debt_id){flow.state.transaction_date_iso=flow.state.transaction_date_iso||parseDateInput('امروز');await updateDraft(repo,flow.draft,flow.state);return panel(env,chatId,mid,formatTxPreview(flow.state),previewKb());}return afterAccount(repo,env,chatId,mid,url,flow);}
-  if(data.startsWith('w:dest:')){const flow=await loadState(repo,'transaction_wizard'),a=await repo.getById('Accounts',data.slice(7));if(!flow||!a)return;flow.state.destination_account_id=a.account_id;flow.state.destination_account_name=a.name;await updateDraft(repo,flow.draft,flow.state);return askDate(env,chatId,mid);}
+  if(data.startsWith('w:dest:')){const flow=await loadState(repo,'transaction_wizard'),a=await repo.getById('Accounts',data.slice(7));if(!flow||!a)return;flow.state.destination_account_id=a.account_id;flow.state.destination_account_name=a.name;await updateDraft(repo,flow.draft,flow.state);return continueAfterDateTime(repo,env,chatId,mid,flow);}
   if(data.startsWith('w:cat:')){const flow=await loadState(repo,'transaction_wizard');if(!flow)return;const id=data.slice(6);if(id==='skip'){flow.state.category_id='';flow.state.category_name='';}else{const c=await repo.getById('Categories',id);flow.state.category_id=id;flow.state.category_name=c?.name||'';}await updateDraft(repo,flow.draft,flow.state);return afterCategory(repo,env,chatId,mid,flow);}
   if(data==='w:date:today'||data==='w:date:yesterday'){const flow=await loadState(repo,'transaction_wizard');if(!flow)return;flow.state.transaction_date_iso=parseDateInput(data.endsWith('today')?'امروز':'دیروز');await updateDraft(repo,flow.draft,flow.state);return afterDate(repo,env,chatId,mid,flow);}
   if(data==='w:date:manual'){const flow=await loadState(repo,'transaction_wizard');if(!flow)return;flow.state.awaiting='date';await updateDraft(repo,flow.draft,flow.state);return panel(env,chatId,mid,'تاریخ شمسی مثل 1405/05/18 یا میلادی مثل 2026/08/09 را بفرستید.',kb([[btn('❌ لغو','w:cancel')]]));}
@@ -281,7 +354,13 @@ async function handleCallback(cb,repo,env,url){
   if(['w:more:fee','w:more:note','w:more:tracking','w:more:reference'].includes(data)){const flow=await loadState(repo,'transaction_wizard');if(!flow)return;flow.state.awaiting={['w:more:fee']:'fee_amount',['w:more:note']:'note',['w:more:tracking']:'tracking_number',['w:more:reference']:'reference_number'}[data];await updateDraft(repo,flow.draft,flow.state);return panel(env,chatId,mid,'مقدار را بفرستید.',kb([[btn('⬅️ بازگشت','w:more')]]));}
   if(data==='w:more:receipt'){const flow=await loadState(repo,'transaction_wizard');if(!flow)return;flow.state.awaiting='receipt';await updateDraft(repo,flow.draft,flow.state);return showReceiptCapture(env,chatId,mid,flow.state);}
   if(data==='w:receipt:done'){const flow=await loadState(repo,'transaction_wizard');if(!flow)return;flow.state.awaiting='';await updateDraft(repo,flow.draft,flow.state);return showAdvanced(repo,env,chatId,mid,flow.state);}
-  if(data==='w:edit')return panel(env,chatId,mid,'✏️ <b>کدام بخش؟</b>',kb([[btn('مبلغ','w:edit:amount'),btn('حساب','w:edit:account')],[btn('دسته','w:edit:category'),btn('تاریخ','w:edit:date')],[btn('ساعت','w:edit:time'),btn('توضیح','w:edit:description')],[btn('جزئیات بیشتر','w:more')],[btn('⬅️ پیش‌نمایش','w:preview')]]));
+  if(data==='w:edit'){
+  const manual=await manualDateTimeSettings(repo),rows=[[btn('مبلغ','w:edit:amount'),btn('حساب','w:edit:account')],[btn('دسته','w:edit:category')]];
+  if(manual.date)rows[1].push(btn('تاریخ','w:edit:date'));
+  if(manual.time)rows.push([btn('ساعت','w:edit:time'),btn('توضیح','w:edit:description')]);else rows.push([btn('توضیح','w:edit:description')]);
+  rows.push([btn('جزئیات بیشتر','w:more')],[btn('⬅️ پیش‌نمایش','w:preview')]);
+  return panel(env,chatId,mid,'✏️ <b>کدام بخش؟</b>',kb(rows));
+}
   if(data==='w:edit:amount'||data==='w:edit:description'){const flow=await loadState(repo,'transaction_wizard');if(!flow)return;flow.state.awaiting=data.endsWith('amount')?'amount':'description';await updateDraft(repo,flow.draft,flow.state);return panel(env,chatId,mid,data.endsWith('amount')?'مبلغ جدید را بفرستید.':'توضیح جدید را بفرستید.',kb([[btn('⬅️ پیش‌نمایش','w:preview')]]));}
   if(data==='w:edit:account')return chooseAccounts(repo,env,chatId,mid,url);
   if(data==='w:edit:category')return chooseCategories(repo,env,chatId,mid);

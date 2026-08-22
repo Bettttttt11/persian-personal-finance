@@ -85,7 +85,7 @@ export async function migrate(repo){
   const cats=await repo.list('Categories',{limit:200,includeDeleted:false});
   if(cats.length===0){const t=nowIso();await repo.batchInsert('Categories',INITIAL_CATEGORIES.map(name=>({category_id:uuid(),name,icon:'',color:'',type:'expense',favorite:false,archived:false,is_deleted:false,deleted_at:'',created_at:t,updated_at:t,schema_version:SCHEMA_VERSION})),{audit:false});}
 
-  const defaults={schema_version:SCHEMA_VERSION,default_currency:'IRR',storage_currency:'IRR',session_timeout:'1h',pin_enabled:!!repo.env?.BOT_PIN,keep_original_receipts:false,receipt_quality:78,receipt_max_side:1600,budget_thresholds:[80,90,100],export_retention_hours:12};
+  const defaults={schema_version:SCHEMA_VERSION,default_currency:'IRR',storage_currency:'IRR',session_timeout:'1h',pin_enabled:!!repo.env?.BOT_PIN,keep_original_receipts:false,receipt_quality:78,receipt_max_side:1600,budget_thresholds:[80,90,100],export_retention_hours:12,manual_transaction_date:false,manual_transaction_time:false};
   const settings=await repo.list('Settings',{limit:5000}); const have=new Set(settings.map(x=>x.key)); const t=nowIso(); const additions=Object.entries(defaults).filter(([key])=>!have.has(key)).map(([key,val])=>({setting_id:uuid(),key,value_json:JSON.stringify(val),updated_at:t,schema_version:SCHEMA_VERSION}));
   if(additions.length)await repo.batchInsert('Settings',additions,{audit:false});
   return {schema_version:SCHEMA_VERSION,sheets:names.length,created_sheets:missingSheets.length,headers_updated:headerWrites.length,currency_storage:'IRR',legacy_toman_converted:!already};

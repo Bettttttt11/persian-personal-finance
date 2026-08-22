@@ -13,7 +13,7 @@ import { DEFAULT_CURRENCY, SCHEMA_VERSION, bad, bool, clearCookie as clearCookie
 import { jalaliMonthRangeOffset, parseDateInput } from './jalali.js';
 
 const ENTITY_ALLOWED=new Set(Object.keys(ENTITY_MAP));
-const ALLOWED_SETTINGS=new Set(['session_timeout','keep_original_receipts','receipt_quality','receipt_max_side','budget_thresholds','default_account','default_currency','reminder_preferences','openrouter_text_model','openrouter_vision_model','openrouter_audio_model','openrouter_file_model','export_retention_hours']);
+const ALLOWED_SETTINGS=new Set(['session_timeout','keep_original_receipts','receipt_quality','receipt_max_side','budget_thresholds','default_account','default_currency','reminder_preferences','openrouter_text_model','openrouter_vision_model','openrouter_audio_model','openrouter_file_model','export_retention_hours','manual_transaction_date','manual_transaction_time']);
 
 function base(env,request){return env.PUBLIC_BASE_URL||new URL(request.url).origin;}
 function withCors(response,request,env){const headers=new Headers(response.headers);for(const [key,value] of Object.entries(corsHeaders(request,base(env,request))))headers.set(key,value);return new Response(response.body,{status:response.status,statusText:response.statusText,headers});}
@@ -189,6 +189,7 @@ function validateSetting(key,value){
   if(key==='receipt_max_side'&&(!Number.isInteger(Number(value))||Number(value)<600||Number(value)>2400))throw new Error('VALIDATION');
   if(key==='export_retention_hours'&&(!Number.isInteger(Number(value))||Number(value)<1||Number(value)>20))throw new Error('VALIDATION');
   if(key==='keep_original_receipts'&&typeof value!=='boolean')throw new Error('VALIDATION');
+  if((key==='manual_transaction_date'||key==='manual_transaction_time')&&typeof value!=='boolean')throw new Error('VALIDATION');
   if(key==='default_currency'&&!['IRR','TOMAN'].includes(String(value||'').toUpperCase()))throw new Error('VALIDATION');
   if(key==='budget_thresholds'){
     if(!Array.isArray(value)||!value.length||value.some(x=>!Number.isFinite(Number(x))||Number(x)<=0||Number(x)>100))throw new Error('VALIDATION');
